@@ -31,8 +31,6 @@ class FeedForwardController(nn.Module):
         self.batch_size = batch_size
         self.memory_dims = memory_dims
 
-        # self.hidden = Variable(torch.FloatTensor(batch_size, 1, num_hidden).normal_(0.0, 1./num_hidden))
-
         self.in_to_hid = nn.Linear(self.num_inputs, self.num_hidden)
         self.read_to_hid = nn.Linear(self.memory_dims[1], self.num_hidden)
 
@@ -43,7 +41,6 @@ class FeedForwardController(nn.Module):
         read = read.view(-1, self.memory_dims[1])
 
         hidden = Funct.relu(self.in_to_hid(x) + self.read_to_hid(read), inplace=True)
-        hidden = hidden
         return hidden
 
 
@@ -58,6 +55,7 @@ class NTM(nn.Module):
 
         self.num_inputs = num_inputs
         self.num_hidden = num_hidden
+        self.num_outputs = num_inputs
         self.batch_size = batch_size
         self.mem_banks = mem_banks
         self.memory_dims = memory_dims
@@ -70,8 +68,7 @@ class NTM(nn.Module):
                        num_shifts=3, memory_banks=self.mem_banks,
                        memory_dims=self.memory_dims)
         self.controller = FeedForwardController(self.num_inputs, self.num_hidden, self.batch_size)
-
-        self.hid_to_out = nn.Linear(self.num_hidden, self.num_inputs)
+        self.hid_to_out = nn.Linear(self.num_hidden, self.num_outputs)
 
     def step(self, x_t, bank_no):
         r_t = self.EMM(self.hidden, bank_no)
@@ -84,8 +81,6 @@ class NTM(nn.Module):
 
     def forward(self, x):
         x = x.permute(1, 0, 2, 3)
-
-
 
         outs = torch.stack(
             [
@@ -125,11 +120,11 @@ def train_ntm(batch, num_inputs, seq_len, num_hidden):
 
     data_loader = DataLoader(test, batch_size=batch, shuffle=True, num_workers=4)
 
-    ntm = NTM(num_inputs, num_hidden, batch, mem_banks=1)
+    ntm = NTM(num_inputs, num_hidden, batch, mem_banks=3)
 
     ntm.train()
 
-    max_epochs = 1
+    max_epochs = 5
     criterion = nn.MSELoss()
     optimizer = optim.RMSprop(ntm.parameters(), weight_decay=0.0005)  # weight_decay=0.0005 seems to be a good balance
 
@@ -150,9 +145,9 @@ def train_ntm(batch, num_inputs, seq_len, num_hidden):
 
             running_loss += loss.data[0]
 
-            if i % 100 == 99:
-                print('[%d, %5d] average loss: %.3f' % (epoch + 1, i + 1, running_loss / 100))
-                if running_loss / 100 <= 0.001:
+            if i % 1000 == 999:
+                print('[%d, %5d] average loss: %.3f' % (epoch + 1, i + 1, running_loss / 1000))
+                if running_loss / 1000 <= 0.001:
                     break
                 running_loss = 0.0
 
@@ -197,4 +192,4 @@ def train_ntm(batch, num_inputs, seq_len, num_hidden):
     print("Total Loss: {}".format(total_loss / len(data_loader)))
 
 if __name__ == '__main__':
-    train_ntm(1, 8, 20, 100)
+    train_ntm(1, 8, 20, 100)  # total loss on 5x seq length is 0.017 (!)
