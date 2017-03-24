@@ -13,3 +13,5 @@ and/or synthetic gradients (this model lends itself well to unlocking
 updates for example).
 
 My original NTM project is [here](https://github.com/bzcheeseman/pytorch-NTM)
+
+Contributing: Fork the repo and play with it! I'm always happy to hear suggestions!
