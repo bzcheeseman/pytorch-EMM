@@ -32,12 +32,12 @@ class EMM(nn.Module):
         self.num_shifts = num_shifts
 
         # Memory for the external memory module
-        self.memory = Variable(torch.ones(memory_banks, *self.memory_dims)) * 1e-5
+        self.memory = Variable(torch.rand(memory_banks, *self.memory_dims))
 
-        # Batch normalization along the different memory variables
+        # Batch normalization within a memory bank
         self.mem_bn = nn.BatchNorm1d(self.memory_dims[1])
 
-        # Batch normalization among the memory banks - forces them to normalize (along actual memory direction)
+        # Batch normalization across the memory banks - forces them together
         self.bank_bn = nn.BatchNorm1d(self.memory_dims[0])
 
         # Read/write weights
@@ -132,9 +132,9 @@ class EMM(nn.Module):
         self.w = self._weight_update(h_t, self.w, self.memory[bank_no])
 
         # Write to memory
-        self.memory[bank_no] = self._write_to_mem(h_t, self.w, self.memory[bank_no])
-        self.memory[bank_no] = self.mem_bn(self.memory[bank_no])
-        self.memory = self.bank_bn(self.memory)
+        self.memory[bank_no] = torch.clamp(self._write_to_mem(h_t, self.w, self.memory[bank_no]), 0.0, 1.0)
+        self.memory[bank_no] = torch.clamp(self.mem_bn(self.memory[bank_no]), 0.0, 1.0)
+        self.memory = torch.clamp(self.bank_bn(self.memory), 0.0, 1.0)
 
         # Decouple histories
         self.w = Variable(self.w.data)
