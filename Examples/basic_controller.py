@@ -50,7 +50,7 @@ class NTM(nn.Module):
                  num_hidden,
                  batch_size,
                  mem_banks,
-                 memory_dims=(128, 20)):
+                 memory_dims=(60, 20)):
         super(NTM, self).__init__()
 
         self.num_inputs = num_inputs
@@ -66,13 +66,16 @@ class NTM(nn.Module):
 
         self.EMM = EMM(self.num_hidden, self.batch_size,
                        num_shifts=3, memory_banks=self.mem_banks,
-                       memory_dims=self.memory_dims)
-        self.controller = FeedForwardController(self.num_inputs, self.num_hidden, self.batch_size)
+                       memory_dims=self.memory_dims).cuda()
+
+        self.controller = FeedForwardController(self.num_inputs, self.num_hidden, self.batch_size,
+                                                memory_dims=self.memory_dims)
+
         self.hid_to_out = nn.Linear(self.num_hidden, self.num_outputs)
 
     def step(self, x_t, bank_no):
-        r_t = self.EMM(self.hidden, bank_no)
-        self.hidden = self.controller(x_t, r_t)
+        r_t = self.EMM(self.hidden.cuda(), bank_no)
+        self.hidden = self.controller(x_t, r_t.cpu())
         h_t = self.hidden.view(-1, num_flat_features(self.hidden))
 
         self.hidden = Variable(self.hidden.data)

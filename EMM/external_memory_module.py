@@ -32,7 +32,7 @@ class EMM(nn.Module):
         self.num_shifts = num_shifts
 
         # Memory for the external memory module
-        self.memory = Variable(torch.rand(memory_banks, *self.memory_dims))
+        self.memory = Variable(torch.rand(memory_banks, *self.memory_dims)) * 1e-5
 
         # Batch normalization within a memory bank
         self.mem_bn = nn.BatchNorm1d(self.memory_dims[1])
@@ -63,6 +63,10 @@ class EMM(nn.Module):
 
         # Add - Clipped Linear
         self.hid_to_add = nn.Linear(self.num_hidden, self.memory_dims[1])
+
+        if self.cuda():
+            self.memory = self.memory.cuda()
+            self.w = self.w.cuda()
 
     def _weight_update(self, h_t, w_tm1, m_t):
 
@@ -110,6 +114,10 @@ class EMM(nn.Module):
 
         mem_erase = torch.zeros(*m_t.size())
         mem_add = torch.zeros(*m_t.size())
+
+        if self.cuda():
+            mem_erase = mem_erase.cuda()
+            mem_add = mem_add.cuda()
 
         for i in range(e_t.size()[0]):  # batch size
             mem_erase += torch.ger(w_tm1[i].data, e_t[i].data)
