@@ -102,6 +102,7 @@ class NTM(nn.Module):
         return outs
 
 
+# pad input and label datasets so the network recognizes the 'go' command (sequence in one half, targets in other)
 def generate_copy_data(input_shape, seq_len, num_samples=2e4):  # not sure if this is right
     output = []
     label = []
@@ -141,7 +142,6 @@ def train_ntm(batch, num_inputs, seq_len, num_hidden):
     test_data, test_labels = generate_copy_data((num_inputs, 1), seq_len)
 
     test = TensorDataset(test_data, test_labels)  # TODO: subclass Dataset class to have varying sequence lengths
-    # pad input and label datasets so the network recognizes the 'go' command (sequence in one half, targets in other)
 
     data_loader = DataLoader(test, batch_size=batch, shuffle=True, num_workers=4)
 
