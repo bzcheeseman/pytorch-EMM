@@ -36,8 +36,7 @@ class FeedForwardController(nn.Module):
 
     def forward(self, x, read):
 
-        x.contiguous()
-        x = x.view(-1, num_flat_features(x))
+        x = x.view(-1, num_flat_features(x)).contiguous()
         read = read.view(-1, self.memory_dims[1])
 
         hidden = Funct.relu(self.in_to_hid(x) + self.read_to_hid(read), inplace=True)
@@ -103,21 +102,35 @@ class NTM(nn.Module):
         return outs
 
 
-def generate_copy_data(input_shape, seq_len, num_samples=2e4):
+def generate_copy_data(input_shape, seq_len, num_samples=2e4):  # not sure if this is right
     output = []
+    label = []
 
     input_tensor = torch.FloatTensor(*input_shape).uniform_(0, 1)
+    delimiter = torch.ones(*input_shape) * 0.5
+    zeros = torch.zeros(seq_len, *input_shape) * 0.5
 
     for j in range(int(num_samples)):
         sample = []
+        sample_label = []
         for i in range(seq_len):
             sample.append(torch.bernoulli(input_tensor))
+            sample_label.append(zeros[i])
 
-        sample = torch.cat(sample).view(seq_len, *input_shape)
+        sample.append(delimiter)
+        sample_label.append(delimiter)
+        for zero in zeros:
+            sample.append(zero)
+            sample_label.append(torch.bernoulli(input_tensor))
+
+        sample = torch.cat(sample).view(2 * seq_len+1, *input_shape)
+        sample_label = torch.cat(sample_label).view(2 * seq_len+1, *input_shape)
         output.append(sample.unsqueeze(0))
+        label.append(sample_label.unsqueeze(0))
 
     output = torch.cat(output, 0)
-    return torch.FloatTensor(output), torch.FloatTensor(output)
+    label = torch.cat(label, 0)
+    return torch.FloatTensor(output), torch.FloatTensor(label)
 
 
 def train_ntm(batch, num_inputs, seq_len, num_hidden):
@@ -128,6 +141,7 @@ def train_ntm(batch, num_inputs, seq_len, num_hidden):
     test_data, test_labels = generate_copy_data((num_inputs, 1), seq_len)
 
     test = TensorDataset(test_data, test_labels)  # TODO: subclass Dataset class to have varying sequence lengths
+    # pad input and label datasets so the network recognizes the 'go' command (sequence in one half, targets in other)
 
     data_loader = DataLoader(test, batch_size=batch, shuffle=True, num_workers=4)
 
@@ -209,4 +223,4 @@ def train_ntm(batch, num_inputs, seq_len, num_hidden):
 
 if __name__ == '__main__':
     train_ntm(1, 8, 20, 100)  # total loss on 5x seq length is 0.017 with 1 memory bank, 1 epoch
-                              # total loss on 5x seq length is 0.0xx with 3 memory banks, 1 epoch
+                              # total loss on 5x seq length is 7.81e-5 with 3 memory banks, 1 epoch
