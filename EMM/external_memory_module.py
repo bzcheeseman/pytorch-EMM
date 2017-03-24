@@ -64,10 +64,6 @@ class EMM(nn.Module):
         # Add - Clipped Linear
         self.hid_to_add = nn.Linear(self.num_hidden, self.memory_dims[1])
 
-        if self.cuda():
-            self.memory = self.memory.cuda()
-            self.w = self.w.cuda()
-
     def _weight_update(self, h_t, w_tm1, m_t):
 
         h_t = h_t.view(-1, num_flat_features(h_t))
@@ -115,10 +111,6 @@ class EMM(nn.Module):
         mem_erase = torch.zeros(*m_t.size())
         mem_add = torch.zeros(*m_t.size())
 
-        if self.cuda():
-            mem_erase = mem_erase.cuda()
-            mem_add = mem_add.cuda()
-
         for i in range(e_t.size()[0]):  # batch size
             mem_erase += torch.ger(w_tm1[i].data, e_t[i].data)
             mem_add += torch.ger(w_tm1[i].data, a_t[i].data)
@@ -134,13 +126,15 @@ class EMM(nn.Module):
     def forward(self, h_t, bank_no):
         # read from memory
         r_t = self._read_from_mem(h_t, self.w, self.memory[bank_no])
-        # technically the controller could take r_t right here if we were being fancy
+        # TODO: Give r_t to the controller here, use synth. gradients (or similar) to decouple updates?
 
         # Update the weights
         self.w = self._weight_update(h_t, self.w, self.memory[bank_no])
 
         # Write to memory
         self.memory[bank_no] = torch.clamp(self._write_to_mem(h_t, self.w, self.memory[bank_no]), 0.0, 1.0)
+
+        # Apply Batch Norm layers
         self.memory[bank_no] = torch.clamp(self.mem_bn(self.memory[bank_no]), 0.0, 1.0)
         self.memory = torch.clamp(self.bank_bn(self.memory), 0.0, 1.0)
 

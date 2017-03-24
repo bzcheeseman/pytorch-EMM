@@ -50,7 +50,7 @@ class NTM(nn.Module):
                  num_hidden,
                  batch_size,
                  mem_banks,
-                 memory_dims=(60, 20)):
+                 memory_dims=(128, 20)):
         super(NTM, self).__init__()
 
         self.num_inputs = num_inputs
@@ -66,7 +66,7 @@ class NTM(nn.Module):
 
         self.EMM = EMM(self.num_hidden, self.batch_size,
                        num_shifts=3, memory_banks=self.mem_banks,
-                       memory_dims=self.memory_dims).cuda()
+                       memory_dims=self.memory_dims)
 
         self.controller = FeedForwardController(self.num_inputs, self.num_hidden, self.batch_size,
                                                 memory_dims=self.memory_dims)
@@ -74,8 +74,10 @@ class NTM(nn.Module):
         self.hid_to_out = nn.Linear(self.num_hidden, self.num_outputs)
 
     def step(self, x_t, bank_no):
-        r_t = self.EMM(self.hidden.cuda(), bank_no)
-        self.hidden = self.controller(x_t, r_t.cpu())
+
+        r_t = self.EMM(self.hidden, bank_no)
+
+        self.hidden = self.controller(x_t, r_t)
         h_t = self.hidden.view(-1, num_flat_features(self.hidden))
 
         self.hidden = Variable(self.hidden.data)
@@ -85,10 +87,16 @@ class NTM(nn.Module):
     def forward(self, x):
         x = x.permute(1, 0, 2, 3)
 
-        outs = torch.stack(
-            [
-                self.step(x[t], t % self.mem_banks) for t in np.arange(x.size()[0])
-            ], 0)
+        if self.training:
+            outs = torch.stack(
+                [
+                    self.step(x[t], t % self.mem_banks) for t in np.arange(x.size()[0])
+                ], 0)
+        else:  # should I change this to be only one bank?
+            outs = torch.stack(
+                [
+                    self.step(x[t], t % self.mem_banks) for t in np.arange(x.size()[0])
+                    ], 0)
 
         outs = outs.permute(1, 0, 2)
 
@@ -119,15 +127,22 @@ def train_ntm(batch, num_inputs, seq_len, num_hidden):
 
     test_data, test_labels = generate_copy_data((num_inputs, 1), seq_len)
 
-    test = TensorDataset(test_data, test_labels)
+    test = TensorDataset(test_data, test_labels)  # TODO: subclass Dataset class to have varying sequence lengths
 
     data_loader = DataLoader(test, batch_size=batch, shuffle=True, num_workers=4)
 
     ntm = NTM(num_inputs, num_hidden, batch, mem_banks=3)
 
+    max_epochs = 5
+
+    try:
+        ntm.load_state_dict(torch.load("models/copy_seqlen_{}.dat".format(seq_len)))
+        max_epochs = 1
+    except FileNotFoundError or AttributeError:
+        pass
+
     ntm.train()
 
-    max_epochs = 5
     criterion = nn.MSELoss()
     optimizer = optim.RMSprop(ntm.parameters(), weight_decay=0.0005)  # weight_decay=0.0005 seems to be a good balance
 
@@ -150,8 +165,6 @@ def train_ntm(batch, num_inputs, seq_len, num_hidden):
 
             if i % 1000 == 999:
                 print('[%d, %5d] average loss: %.3f' % (epoch + 1, i + 1, running_loss / 1000))
-                if running_loss / 1000 <= 0.001:
-                    break
                 running_loss = 0.0
 
                 plottable_input = torch.squeeze(inputs.data[0]).numpy()
@@ -163,7 +176,7 @@ def train_ntm(batch, num_inputs, seq_len, num_hidden):
                 plt.savefig("plots/ntm/{}_{}_net_output.png".format(epoch + 1, i + 1))
                 plt.close()
 
-    torch.save(ntm.state_dict(), "models/copy_seqlen_{}".format(seq_len))
+    torch.save(ntm.state_dict(), "models/copy_seqlen_{}.dat".format(seq_len))
     print("Finished Training")
 
     data, labels = generate_copy_data((8, 1), 5 * seq_len, 1000)
@@ -195,4 +208,5 @@ def train_ntm(batch, num_inputs, seq_len, num_hidden):
     print("Total Loss: {}".format(total_loss / len(data_loader)))
 
 if __name__ == '__main__':
-    train_ntm(1, 8, 20, 100)  # total loss on 5x seq length is 0.017 (!)
+    train_ntm(1, 8, 20, 100)  # total loss on 5x seq length is 0.017 with 1 memory bank, 1 epoch
+                              # total loss on 5x seq length is 0.0xx with 3 memory banks, 1 epoch
