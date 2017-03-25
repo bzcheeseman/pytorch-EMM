@@ -15,6 +15,7 @@ import numpy as np
 
 from Utils import num_flat_features
 from EMM import EMM_NTM
+from Utils import CopyTask
 
 
 class FeedForwardController(nn.Module):
@@ -89,6 +90,7 @@ class NTM(nn.Module):
         return out
 
     def forward(self, x):
+
         x = x.permute(1, 0, 2, 3)
 
         if self.training:
@@ -103,42 +105,8 @@ class NTM(nn.Module):
                     ], 0)
 
         outs = outs.permute(1, 0, 2)
-        # self.EMM.clear_mem()  # clear memory after each step
 
         return outs
-
-
-# pad input and label datasets so the network recognizes the 'go' command (sequence in one half, targets in other)
-# look at ntm-lasagne for task generation
-def generate_copy_data(input_shape, seq_len, num_samples=2e4):  # not sure if this is right
-    output = []
-    label = []
-
-    input_tensor = torch.FloatTensor(*input_shape).uniform_(0, 1)
-    delimiter = torch.ones(*input_shape) * 0.5
-    zeros = torch.zeros(seq_len, *input_shape) * 0.5
-
-    for j in range(int(num_samples)):
-        sample = []
-        sample_label = []
-        for i in range(seq_len):
-            sample.append(torch.bernoulli(input_tensor))
-            sample_label.append(zeros[i])
-
-        sample.append(delimiter)
-        sample_label.append(torch.zeros(*input_shape))
-        for i in range(seq_len):
-            sample.append(zeros[i])
-            sample_label.append(sample[i])
-
-        sample = torch.cat(sample).view(2 * seq_len+1, *input_shape)
-        sample_label = torch.cat(sample_label).view(2 * seq_len+1, *input_shape)
-        output.append(sample.unsqueeze(0))
-        label.append(sample_label.unsqueeze(0))
-
-    output = torch.cat(output, 0)
-    label = torch.cat(label, 0)
-    return torch.FloatTensor(output), torch.FloatTensor(label)
 
 
 def train_ntm(batch, num_inputs, seq_len, num_hidden):
@@ -163,9 +131,7 @@ def train_ntm(batch, num_inputs, seq_len, num_hidden):
     for length in range(5, max_seq_len):
         running_loss = 0.0
 
-        test_data, test_labels = generate_copy_data((num_inputs, 1), length, num_samples=1e5)
-
-        test = TensorDataset(test_data, test_labels)  # TODO: subclass Dataset class to have varying sequence lengths
+        test = CopyTask(length, [num_inputs-1, 1], num_samples=2e4)
 
         data_loader = DataLoader(test, batch_size=batch, shuffle=True, num_workers=4)
 

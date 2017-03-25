@@ -127,7 +127,7 @@ class EMM_NTM(nn.Module):
         r_t = torch.mm(w_tm1, m_t)
         return r_t
 
-    def clear_mem(self):
+    def clear_mem(self):  # almost never should need this afaik
         self.memory = Variable(torch.ones(self.memory_banks, *self.memory_dims)) * 1e-5
 
     def forward(self, h_t, bank_no):
@@ -145,9 +145,8 @@ class EMM_NTM(nn.Module):
 
         # print(self.memory.size())
 
-        # Apply Batch Norm layers
-        # self.memory[bank_no] = self.mem_bn(self.memory[bank_no])
-        # self.memory = self.bank_bn(self.memory.permute(1, 0, 2)).permute(1, 0, 2)
+        # Apply Batch Norm layer
+        self.memory = self.bank_bn(self.memory.permute(1, 0, 2)).permute(1, 0, 2)
 
         # Decouple histories - clear memory after each run?
         self.wr = Variable(self.wr.data)
