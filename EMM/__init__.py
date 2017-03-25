@@ -6,4 +6,4 @@
 # Full license at pytorch-EMM/LICENSE.txt
 #
 
-from .external_memory_module import EMM
+from .external_memory_module import EMM_NTM
