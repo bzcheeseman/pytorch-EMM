@@ -112,9 +112,9 @@ class NTM(nn.Module):
 def train_ntm(batch, num_inputs, seq_len, num_hidden):
 
     import matplotlib.pyplot as plt
-    from torch.utils.data import DataLoader, TensorDataset
+    from torch.utils.data import DataLoader
 
-    ntm = NTM(num_inputs, num_hidden, batch, num_reads=1, mem_banks=2)
+    ntm = NTM(num_inputs, num_hidden, batch, num_reads=2, mem_banks=5)
 
     try:
         ntm.load_state_dict(torch.load("models/copy_seqlen_{}.dat".format(seq_len)))
@@ -124,7 +124,7 @@ def train_ntm(batch, num_inputs, seq_len, num_hidden):
     ntm.train()
 
     criterion = nn.MSELoss()
-    optimizer = optim.RMSprop(ntm.parameters(), lr=1e-3, weight_decay=0.0005)
+    optimizer = optim.RMSprop(ntm.parameters(), lr=1e-3)
     # weight_decay=0.0005 seems to be a good balance
 
     max_seq_len = 20  # change the training schedule to be curriculum training
@@ -179,9 +179,7 @@ def train_ntm(batch, num_inputs, seq_len, num_hidden):
     torch.save(ntm.state_dict(), "models/copy_seqlen_{}.dat".format(seq_len))
     print("Finished Training")
 
-    data, labels = generate_copy_data((8, 1), 5 * seq_len, 1000)
-
-    test = TensorDataset(data, labels)
+    test = CopyTask(5 * max_seq_len, [num_inputs-1, 1], num_samples=1e4)
     data_loader = DataLoader(test, batch_size=batch, shuffle=True, num_workers=4)
 
     total_loss = 0.0

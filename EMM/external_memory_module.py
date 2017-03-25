@@ -35,7 +35,7 @@ class EMM_NTM(nn.Module):
         self.num_reads = num_reads
 
         # Memory for the external memory module
-        self.memory = Variable(torch.rand(memory_banks, *self.memory_dims)) * 1e-5
+        self.memory = Variable(torch.ones(memory_banks, *self.memory_dims)) * 1e-4
 
         # Batch normalization across the memory banks - forces them together
         self.bank_bn = nn.BatchNorm1d(memory_banks)
@@ -102,7 +102,7 @@ class EMM_NTM(nn.Module):
         # Sharpening
         gamma_tr = gamma_t.repeat(1, self.memory_dims[0])
         w = w_tilde.pow(gamma_tr)
-        w = Funct.softmax(w)
+        w = torch.div(w, torch.sum(w).data[0] + 1e-5)
 
         return w
 
@@ -127,9 +127,6 @@ class EMM_NTM(nn.Module):
         r_t = torch.mm(w_tm1, m_t)
         return r_t
 
-    def clear_mem(self):  # almost never should need this afaik
-        self.memory = Variable(torch.ones(self.memory_banks, *self.memory_dims)) * 1e-5
-
     def forward(self, h_t, bank_no):
         # Update write weights and write to memory
         self.ww = self._weight_update(h_t, self.ww, self.memory[bank_no].clone())
@@ -142,8 +139,6 @@ class EMM_NTM(nn.Module):
             r_t.append(self._read_from_mem(h_t, self.wr[i].clone(), self.memory[bank_no].clone()))
 
         r_t = torch.cat(r_t, 1)
-
-        # print(self.memory.size())
 
         # Apply Batch Norm layer
         self.memory = self.bank_bn(self.memory.permute(1, 0, 2)).permute(1, 0, 2)
@@ -159,6 +154,7 @@ class EMM_NTM(nn.Module):
 class EMM_GPU(nn.Module):
     def __init__(self,
                  num_hidden,
+                 read_size,
                  batch_size,
                  memory_banks=1,
                  memory_dims=(128, 20)):
@@ -166,64 +162,101 @@ class EMM_GPU(nn.Module):
 
         self.memory_dims = memory_dims
         self.num_hidden = num_hidden
+        self.read_size = read_size
         self.batch_size = batch_size
         self.memory_banks = memory_banks
 
-        # transform from something useful for the controller - check the sizes, want it to end up the size of the memory
-        self.lin_1_out = nn.Linear(self.num_hidden, self.memory_dims[0] * self.memory_dims[1])
-        self.lin_3_out = nn.Linear(self.num_hidden, (self.memory_dims[0] - 3 + 1) * (self.memory_dims[1] - 3 + 1))
-        self.lin_5_out = nn.Linear(self.num_hidden, (self.memory_dims[0] - 5 + 1) * (self.memory_dims[1] - 5 + 1))
-        self.lin_7_out = nn.Linear(self.num_hidden, (self.memory_dims[0] - 7 + 1) * (self.memory_dims[1] - 7 + 1))
-        # filters into the full memory banks
-        self.filter_1_in = nn.Conv2d(1, memory_banks, 1)
-        self.filter_3_in = nn.Conv2d(1, memory_banks, 3)
-        self.filter_5_in = nn.Conv2d(1, memory_banks, 5)
-        self.filter_7_in = nn.Conv2d(1, memory_banks, 7)
+        # Gates for filters ####################################################################################
+        self.focus_gate = nn.Linear(self.num_hidden, 1)
+        self.wide_gate = nn.Linear(self.num_hidden, 1)
 
-        # filters out of the full memory banks
-        self.filter_1_out = nn.Conv2d(memory_banks, 1, 1)
-        self.filter_3_out = nn.Conv2d(memory_banks, 1, 3)
-        self.filter_5_out = nn.Conv2d(memory_banks, 1, 5)
-        self.filter_7_out = nn.Conv2d(memory_banks, 1, 7)
-        # transform to something useful for the controller
-        self.lin_1_out = nn.Linear(self.memory_dims[0]*self.memory_dims[1], self.num_hidden)
-        self.lin_3_out = nn.Linear((self.memory_dims[0]-3+1)*(self.memory_dims[1]-3+1), self.num_hidden)
-        self.lin_5_out = nn.Linear((self.memory_dims[0] - 5 + 1) * (self.memory_dims[1] - 5 + 1), self.num_hidden)
-        self.lin_7_out = nn.Linear((self.memory_dims[0] - 7 + 1) * (self.memory_dims[1] - 7 + 1), self.num_hidden)
+        # Reading ##############################################################################################
+        self.focused_read_filter = Variable(torch.ones(1, self.memory_banks, 3, 3))
+        self.wide_read_filter = Variable(torch.ones(1, self.memory_banks, 7, 7))
+        self.hidden_to_read_f = nn.Linear(self.num_hidden, self.memory_banks * 3 * 3)
+        self.hidden_to_read_w = nn.Linear(self.num_hidden, self.memory_banks * 7 * 7)
 
-        # Memory for the external memory module
+        self.conv_focused_to_read = nn.Linear((self.memory_dims[0] - 3 + 1) * (self.memory_dims[1] - 3 + 1),
+                                              self.read_size)
+        self.conv_wide_to_read = nn.Linear((self.memory_dims[0] - 7 + 1) * (self.memory_dims[1] - 7 + 1),
+                                           self.read_size)
+
+        # Writing ##############################################################################################
+        self.hidden_focused_to_conv = nn.Linear(self.num_hidden,
+                                                self.memory_banks * (self.memory_dims[0] + 3 - 1)
+                                                * (self.memory_dims[1] + 3 - 1))
+        self.hidden_wide_to_conv = nn.Linear(self.num_hidden,
+                                             self.memory_banks * (self.memory_dims[0] + 7 - 1)
+                                             * (self.memory_dims[1] + 7 - 1))
+
+        self.focused_write_filter = Variable(torch.ones(self.memory_banks, 1, 3, 3))
+        self.wide_write_filter = Variable(torch.ones(self.memory_banks, 1, 7, 7))
+        self.hidden_to_write_f = nn.Linear(self.num_hidden, self.memory_banks * 3 * 3)
+        self.hidden_to_write_w = nn.Linear(self.num_hidden, self.memory_banks * 7 * 7)
+
+        # Memory for the external memory module #################################################################
         self.memory = Variable(torch.ones(batch_size, memory_banks, *self.memory_dims)) * 1e-5
 
-    def _read_from_mem(self):
-        # Read from the memory
-        single = Funct.hardtanh(self.filter_1_out(self.memory))  # collapses it into one matrix
-        triple = Funct.hardtanh(self.filter_3_out(self.memory))  # also condenses it down
-        quint = Funct.hardtanh(self.filter_5_out(self.memory))  # condenses it more
-        sept = Funct.hardtanh(self.filter_7_out(self.memory))  # condenses it the most
+    def _read_from_mem(self, gf_t, gw_t, h_t):
 
-        single.contiguous()
-        triple.contiguous()
-        quint.contiguous()
-        sept.contiguous()
-        single = single.view(-1, num_flat_features(single))
-        triple = triple.view(-1, num_flat_features(triple))
-        quint = quint.view(-1, num_flat_features(quint))
-        sept = sept.view(-1, num_flat_features(sept))
+        frf_t = Funct.hardtanh(self.hidden_to_read_f(h_t), min_val=0.0, max_val=1.0)
+        wrf_t = Funct.hardtanh(self.hidden_to_read_w(h_t), min_val=0.0, max_val=1.0)
 
-        single = Funct.relu(self.lin_1_out(single), inplace=True)
-        triple = Funct.relu(self.lin_3_out(triple), inplace=True)
-        quint = Funct.relu(self.lin_5_out(quint), inplace=True)
-        sept = Funct.relu(self.lin_7_out(sept), inplace=True)
+        frf_t = frf_t.view(*self.focused_read_filter.size())
+        wrf_t = wrf_t.view(*self.wide_read_filter.size())
 
-        # combine these into one somehow? Just concat?
+        self.focused_read_filter = frf_t * gf_t.data[0, 0] + self.focused_read_filter * (1.0 - gf_t.data[0, 0])
+        self.wide_read_filter = wrf_t * gw_t.data[0, 0] + self.wide_read_filter * (1.0 - gw_t.data[0, 0])
 
+        focused_read = Funct.conv2d(self.memory, self.focused_read_filter)  # (126, 18) = memory_dims - 3 + 1
+        wide_read = Funct.conv2d(self.memory, self.wide_read_filter)  # (122, 14) = memory_dims - 7 + 1
 
-    def _write_to_mem(self, h_t):
-        pass
-        # do the same process as read in reverse
+        focused_read = focused_read.view(-1, num_flat_features(focused_read))
+        wide_read = wide_read.view(-1, num_flat_features(wide_read))
+
+        read = Funct.relu(self.conv_focused_to_read(focused_read))
+        read += Funct.relu(self.conv_wide_to_read(wide_read))
+
+        print(read.size())
+
+    def _write_to_mem(self, gf_t, gw_t, h_t):
+
+        fwf_t = Funct.hardtanh(self.hidden_to_write_f(h_t), min_val=0.0, max_val=1.0)
+        wwf_t = Funct.hardtanh(self.hidden_to_write_w(h_t), min_val=0.0, max_val=1.0)
+
+        fwf_t = fwf_t.view(*self.focused_write_filter.size())
+        wwf_t = wwf_t.view(*self.wide_write_filter.size())
+
+        self.focused_write_filter = fwf_t * gf_t.data[0, 0] + self.focused_write_filter * (1.0 - gf_t.data[0, 0])
+        self.wide_write_filter = wwf_t * gw_t.data[0, 0] + self.wide_write_filter * (1.0 - gw_t.data[0, 0])
+
+        # make h_t into something that can be convolved and then added into memory
+        mwf_t = Funct.relu(self.hidden_focused_to_conv(h_t))
+        mww_t = Funct.relu(self.hidden_wide_to_conv(h_t))
+
+        print(mwf_t.size())
+
+        mwf_t = mwf_t.view(self.memory_banks, (self.memory_dims[0] + 3 - 1), (self.memory_dims[1] + 3 - 1))
+        mwf_t = mwf_t.view(self.memory_banks, (self.memory_dims[0] + 7 - 1), (self.memory_dims[1] + 7 - 1))
+
+        focused_write = Funct.conv2d(mwf_t, self.focused_write_filter)
+        wide_write = Funct.conv2d(mww_t, self.wide_write_filter)
+
+        # and finally add it to the memory, add or erase
+
+        print(focused_write.size())
+        print(wide_write.size())
+
+    def forward(self, h_t):
+        h_t = h_t.view(-1, num_flat_features(h_t))
+        gf_t = Funct.sigmoid(self.focus_gate(h_t))
+        gw_t = Funct.sigmoid(self.wide_gate(h_t))
+
+        self._read_from_mem(gf_t, gw_t, h_t)
+        # self._write_to_mem(gf_t, gw_t, h_t)
 
 
 if __name__ == "__main__":
-    emm = EMM_GPU(100, 1, memory_banks=5)
-    emm._read_from_mem()
-
+    emm = EMM_GPU(100, 50, 1, memory_banks=5)
+    hidden = Variable(torch.rand(1, 100))
+    emm.forward(hidden)
