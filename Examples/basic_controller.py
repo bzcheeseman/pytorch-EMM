@@ -14,7 +14,7 @@ import torch.optim as optim
 import numpy as np
 
 from Utils import num_flat_features
-from EMM import EMM_NTM
+from EMM import EMM_NTM, EMM_GPU
 from Utils import CopyTask
 
 
@@ -41,7 +41,7 @@ class FeedForwardController(nn.Module):
         x = x.contiguous()
         x = x.view(-1, num_flat_features(x))
         read = read.contiguous()
-        read = read.view(-1, num_flat_features(read))
+        # read = read.view(-1, num_flat_features(read))
 
         hidden = Funct.relu(self.in_to_hid(x) + self.read_to_hid(read), inplace=True)
         return hidden
@@ -73,14 +73,28 @@ class NTM(nn.Module):
                            num_shifts=3, memory_banks=self.mem_banks,
                            memory_dims=self.memory_dims)
 
+        # self.EMM = EMM_GPU(self.num_hidden, self.num_reads*self.memory_dims[1], self.batch_size,
+        #                    memory_banks=self.mem_banks, memory_dims=self.memory_dims)
+
         self.controller = FeedForwardController(self.num_inputs, self.num_hidden, self.batch_size,
                                                 num_reads=self.num_reads, memory_dims=self.memory_dims)
 
         self.hid_to_out = nn.Linear(self.num_hidden, self.num_outputs)
 
-    def step(self, x_t, bank_no):
+    def step_NTM(self, x_t, bank_no):
 
         r_t = self.EMM(self.hidden, bank_no)
+
+        self.hidden = self.controller(x_t, r_t)
+        h_t = self.hidden.view(-1, num_flat_features(self.hidden))
+
+        self.hidden = Variable(self.hidden.data)
+        out = Funct.hardtanh(self.hid_to_out(h_t), min_val=0.0, max_val=1.0)
+        return out
+
+    def step_GPU(self, x_t):
+
+        r_t = self.EMM(self.hidden)
 
         self.hidden = self.controller(x_t, r_t)
         h_t = self.hidden.view(-1, num_flat_features(self.hidden))
@@ -93,15 +107,15 @@ class NTM(nn.Module):
 
         x = x.permute(1, 0, 2, 3)
 
-        if self.training:
+        if isinstance(self.EMM, EMM_NTM):
             outs = torch.stack(
                 [
-                    self.step(x[t], t % self.mem_banks) for t in np.arange(x.size()[0])
+                    self.step_NTM(x[t], t % self.mem_banks) for t in np.arange(x.size()[0])
                 ], 0)
         else:  # should I change this to be only one bank?
             outs = torch.stack(
                 [
-                    self.step(x[t], t % self.mem_banks) for t in np.arange(x.size()[0])
+                    self.step_GPU(x_t) for x_t in torch.unbind(x, 0)
                     ], 0)
 
         outs = outs.permute(1, 0, 2)
@@ -114,7 +128,7 @@ def train_ntm(batch, num_inputs, seq_len, num_hidden):
     import matplotlib.pyplot as plt
     from torch.utils.data import DataLoader
 
-    ntm = NTM(num_inputs, num_hidden, batch, num_reads=2, mem_banks=5)
+    ntm = NTM(num_inputs, num_hidden, batch, num_reads=2, mem_banks=2)
 
     try:
         ntm.load_state_dict(torch.load("models/copy_seqlen_{}.dat".format(seq_len)))
@@ -124,11 +138,11 @@ def train_ntm(batch, num_inputs, seq_len, num_hidden):
     ntm.train()
 
     criterion = nn.MSELoss()
-    optimizer = optim.RMSprop(ntm.parameters(), lr=1e-3)
+    optimizer = optim.RMSprop(ntm.parameters(), lr=5e-3)
     # weight_decay=0.0005 seems to be a good balance
 
     max_seq_len = 20  # change the training schedule to be curriculum training
-    for length in range(5, max_seq_len):
+    for length in range(7, max_seq_len):
         running_loss = 0.0
 
         test = CopyTask(length, [num_inputs-1, 1], num_samples=2e4)

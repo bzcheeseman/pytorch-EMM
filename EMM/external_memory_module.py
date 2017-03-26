@@ -171,7 +171,7 @@ class EMM_GPU(nn.Module):
         self.wide_gate = nn.Linear(self.num_hidden, 1)
 
         # Reading ##############################################################################################
-        self.focused_read_filter = Variable(torch.ones(1, self.memory_banks, 3, 3))
+        self.focused_read_filter = Variable(torch.ones(1, self.memory_banks, 3, 3))  # (out, in, kh, kw)
         self.wide_read_filter = Variable(torch.ones(1, self.memory_banks, 7, 7))
         self.hidden_to_read_f = nn.Linear(self.num_hidden, self.memory_banks * 3 * 3)
         self.hidden_to_read_w = nn.Linear(self.num_hidden, self.memory_banks * 7 * 7)
@@ -183,13 +183,17 @@ class EMM_GPU(nn.Module):
 
         # Writing ##############################################################################################
         self.hidden_focused_to_conv = nn.Linear(self.num_hidden,
-                                                self.memory_banks * (self.memory_dims[0] + 3 - 1)
+                                                (self.memory_dims[0] + 3 - 1)
                                                 * (self.memory_dims[1] + 3 - 1))
         self.hidden_wide_to_conv = nn.Linear(self.num_hidden,
-                                             self.memory_banks * (self.memory_dims[0] + 7 - 1)
+                                             (self.memory_dims[0] + 7 - 1)
                                              * (self.memory_dims[1] + 7 - 1))
 
-        self.focused_write_filter = Variable(torch.ones(self.memory_banks, 1, 3, 3))
+        # Add and erase gate for writing ##
+        self.add_gate = nn.Linear(self.num_hidden, 1)
+        self.erase_gate = nn.Linear(self.num_hidden, 1)
+
+        self.focused_write_filter = Variable(torch.ones(self.memory_banks, 1, 3, 3))  # (out, in, kh, kw)
         self.wide_write_filter = Variable(torch.ones(self.memory_banks, 1, 7, 7))
         self.hidden_to_write_f = nn.Linear(self.num_hidden, self.memory_banks * 3 * 3)
         self.hidden_to_write_w = nn.Linear(self.num_hidden, self.memory_banks * 7 * 7)
@@ -205,11 +209,15 @@ class EMM_GPU(nn.Module):
         frf_t = frf_t.view(*self.focused_read_filter.size())
         wrf_t = wrf_t.view(*self.wide_read_filter.size())
 
-        self.focused_read_filter = frf_t * gf_t.data[0, 0] + self.focused_read_filter * (1.0 - gf_t.data[0, 0])
-        self.wide_read_filter = wrf_t * gw_t.data[0, 0] + self.wide_read_filter * (1.0 - gw_t.data[0, 0])
+        gf_t = gf_t.repeat(*frf_t.size())
+        gw_t = gw_t.repeat(*wrf_t.size())
 
-        focused_read = Funct.conv2d(self.memory, self.focused_read_filter)  # (126, 18) = memory_dims - 3 + 1
-        wide_read = Funct.conv2d(self.memory, self.wide_read_filter)  # (122, 14) = memory_dims - 7 + 1
+        self.focused_read_filter = frf_t * gf_t + self.focused_read_filter * (1.0 - gf_t)
+
+        self.wide_read_filter = wrf_t * gw_t + self.wide_read_filter * (1.0 - gw_t)
+
+        focused_read = Funct.relu(Funct.conv2d(self.memory, self.focused_read_filter))  # (126, 18) = memory_dims - 3 + 1
+        wide_read = Funct.relu(Funct.conv2d(self.memory, self.wide_read_filter))  # (122, 14) = memory_dims - 7 + 1
 
         focused_read = focused_read.view(-1, num_flat_features(focused_read))
         wide_read = wide_read.view(-1, num_flat_features(wide_read))
@@ -217,43 +225,63 @@ class EMM_GPU(nn.Module):
         read = Funct.relu(self.conv_focused_to_read(focused_read))
         read += Funct.relu(self.conv_wide_to_read(wide_read))
 
-        print(read.size())
+        return read
 
     def _write_to_mem(self, gf_t, gw_t, h_t):
 
+        # compute filter parameters
         fwf_t = Funct.hardtanh(self.hidden_to_write_f(h_t), min_val=0.0, max_val=1.0)
         wwf_t = Funct.hardtanh(self.hidden_to_write_w(h_t), min_val=0.0, max_val=1.0)
 
         fwf_t = fwf_t.view(*self.focused_write_filter.size())
         wwf_t = wwf_t.view(*self.wide_write_filter.size())
 
-        self.focused_write_filter = fwf_t * gf_t.data[0, 0] + self.focused_write_filter * (1.0 - gf_t.data[0, 0])
-        self.wide_write_filter = wwf_t * gw_t.data[0, 0] + self.wide_write_filter * (1.0 - gw_t.data[0, 0])
+        gf_t = gf_t.repeat(*fwf_t.size())
+        gw_t = gw_t.repeat(*wwf_t.size())
 
-        # make h_t into something that can be convolved and then added into memory
+        # Gate the filters
+        self.focused_write_filter = fwf_t * gf_t + self.focused_write_filter * (1.0 - gf_t)
+
+        self.wide_write_filter = wwf_t * gw_t + self.wide_write_filter * (1.0 - gw_t)
+
+        # turn h into write matrices
         mwf_t = Funct.relu(self.hidden_focused_to_conv(h_t))
         mww_t = Funct.relu(self.hidden_wide_to_conv(h_t))
 
-        print(mwf_t.size())
+        mwf_t = mwf_t.view(1, (self.memory_dims[0] + 3 - 1), (self.memory_dims[1] + 3 - 1))
+        mww_t = mww_t.view(1, (self.memory_dims[0] + 7 - 1), (self.memory_dims[1] + 7 - 1))
 
-        mwf_t = mwf_t.view(self.memory_banks, (self.memory_dims[0] + 3 - 1), (self.memory_dims[1] + 3 - 1))
-        mwf_t = mwf_t.view(self.memory_banks, (self.memory_dims[0] + 7 - 1), (self.memory_dims[1] + 7 - 1))
+        # convolve converted h into the correct form
+        focused_write = Funct.conv2d(mwf_t.unsqueeze(0), self.focused_write_filter)
+        wide_write = Funct.conv2d(mww_t.unsqueeze(0), self.wide_write_filter)
 
-        focused_write = Funct.conv2d(mwf_t, self.focused_write_filter)
-        wide_write = Funct.conv2d(mww_t, self.wide_write_filter)
+        focused_write = focused_write.squeeze(0)
+        wide_write = wide_write.squeeze(0)
 
         # and finally add it to the memory, add or erase
+        add = self.add_gate(h_t)
+        erase = self.erase_gate(h_t)
 
-        print(focused_write.size())
-        print(wide_write.size())
+        add = add.repeat(*wide_write.size())
+        erase = erase.repeat(*focused_write.size())
 
-    def forward(self, h_t):
+        m_t = focused_write * (1.0 - erase) + focused_write * add + wide_write * (1.0 - erase) + wide_write * add
+
+        m_t = Funct.softmax(m_t)  # not sure about this
+
+        self.memory += m_t
+
+    def forward(self, h_t):  # something is making it so that one of the variables is being modified.
         h_t = h_t.view(-1, num_flat_features(h_t))
+
         gf_t = Funct.sigmoid(self.focus_gate(h_t))
         gw_t = Funct.sigmoid(self.wide_gate(h_t))
 
-        self._read_from_mem(gf_t, gw_t, h_t)
-        # self._write_to_mem(gf_t, gw_t, h_t)
+        self._write_to_mem(gf_t, gw_t, h_t)
+
+        r_t = self._read_from_mem(gf_t, gw_t, h_t)
+
+        return r_t
 
 
 if __name__ == "__main__":
