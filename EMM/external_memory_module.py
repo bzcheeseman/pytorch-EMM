@@ -203,8 +203,8 @@ class EMM_GPU(nn.Module):
 
     def _read_from_mem(self, gf_t, gw_t, h_t):
 
-        frf_t = Funct.hardtanh(self.hidden_to_read_f(h_t), min_val=0.0, max_val=1.0)
-        wrf_t = Funct.hardtanh(self.hidden_to_read_w(h_t), min_val=0.0, max_val=1.0)
+        frf_t = Funct.sigmoid(self.hidden_to_read_f(h_t))
+        wrf_t = Funct.sigmoid(self.hidden_to_read_w(h_t))
 
         frf_t = frf_t.view(*self.focused_read_filter.size())
         wrf_t = wrf_t.view(*self.wide_read_filter.size())
@@ -216,8 +216,11 @@ class EMM_GPU(nn.Module):
 
         self.wide_read_filter = wrf_t * gw_t + self.wide_read_filter * (1.0 - gw_t)
 
-        focused_read = Funct.relu(Funct.conv2d(self.memory, self.focused_read_filter))  # (126, 18) = memory_dims - 3 + 1
-        wide_read = Funct.relu(Funct.conv2d(self.memory, self.wide_read_filter))  # (122, 14) = memory_dims - 7 + 1
+        focused_read = Funct.relu(Funct.conv2d(self.memory, self.focused_read_filter)).squeeze(1)
+        # (126, 18) = memory_dims - 3 + 1
+
+        wide_read = Funct.relu(Funct.conv2d(self.memory, self.wide_read_filter)).squeeze(1)
+        # (122, 14) = memory_dims - 7 + 1
 
         focused_read = focused_read.view(-1, num_flat_features(focused_read))
         wide_read = wide_read.view(-1, num_flat_features(wide_read))
@@ -227,11 +230,12 @@ class EMM_GPU(nn.Module):
 
         return read
 
+    # problem here, tensor is modified in place
     def _write_to_mem(self, gf_t, gw_t, h_t):
 
         # compute filter parameters
-        fwf_t = Funct.hardtanh(self.hidden_to_write_f(h_t), min_val=0.0, max_val=1.0)
-        wwf_t = Funct.hardtanh(self.hidden_to_write_w(h_t), min_val=0.0, max_val=1.0)
+        fwf_t = Funct.sigmoid(self.hidden_to_write_f(h_t))
+        wwf_t = Funct.sigmoid(self.hidden_to_write_w(h_t))
 
         fwf_t = fwf_t.view(*self.focused_write_filter.size())
         wwf_t = wwf_t.view(*self.wide_write_filter.size())
@@ -248,15 +252,15 @@ class EMM_GPU(nn.Module):
         mwf_t = Funct.relu(self.hidden_focused_to_conv(h_t))
         mww_t = Funct.relu(self.hidden_wide_to_conv(h_t))
 
-        mwf_t = mwf_t.view(1, (self.memory_dims[0] + 3 - 1), (self.memory_dims[1] + 3 - 1))
-        mww_t = mww_t.view(1, (self.memory_dims[0] + 7 - 1), (self.memory_dims[1] + 7 - 1))
+        mwf_t = mwf_t.view(1, 1, (self.memory_dims[0] + 3 - 1), (self.memory_dims[1] + 3 - 1))
+        mww_t = mww_t.view(1, 1, (self.memory_dims[0] + 7 - 1), (self.memory_dims[1] + 7 - 1))
 
         # convolve converted h into the correct form
-        focused_write = Funct.conv2d(mwf_t.unsqueeze(0), self.focused_write_filter)
-        wide_write = Funct.conv2d(mww_t.unsqueeze(0), self.wide_write_filter)
+        focused_write = Funct.conv2d(mwf_t, self.focused_write_filter)
+        wide_write = Funct.conv2d(mww_t, self.wide_write_filter)
 
-        focused_write = focused_write.squeeze(0)
-        wide_write = wide_write.squeeze(0)
+        focused_write = focused_write
+        wide_write = wide_write
 
         # and finally add it to the memory, add or erase
         add = self.add_gate(h_t)
@@ -269,7 +273,7 @@ class EMM_GPU(nn.Module):
 
         m_t = Funct.softmax(m_t)  # not sure about this
 
-        self.memory += m_t
+        self.memory = self.memory + m_t
 
     def forward(self, h_t):  # something is making it so that one of the variables is being modified.
         h_t = h_t.view(-1, num_flat_features(h_t))
