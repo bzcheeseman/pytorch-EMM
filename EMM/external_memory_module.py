@@ -225,12 +225,10 @@ class EMM_GPU(nn.Module):
         focused_read = focused_read.view(-1, num_flat_features(focused_read))
         wide_read = wide_read.view(-1, num_flat_features(wide_read))
 
-        read = Funct.relu(self.conv_focused_to_read(focused_read))
-        read += Funct.relu(self.conv_wide_to_read(wide_read))
+        read = Funct.relu(self.conv_focused_to_read(focused_read)) + Funct.relu(self.conv_wide_to_read(wide_read))
 
         return read
 
-    # problem here, tensor is modified in place
     def _write_to_mem(self, gf_t, gw_t, h_t):
 
         # compute filter parameters

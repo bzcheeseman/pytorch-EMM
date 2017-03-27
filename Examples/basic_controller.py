@@ -41,10 +41,9 @@ class FeedForwardController(nn.Module):
         x = x.contiguous()
         read = read.contiguous()
 
-        x = self.in_to_hid(x) + self.read_to_hid(read)
+        x = Funct.relu(self.in_to_hid(x) + self.read_to_hid(read))
 
-        hidden = Funct.relu(x)
-        return hidden
+        return x
 
 
 class GRUController(nn.Module):
@@ -180,9 +179,9 @@ class GPU_NTM(nn.Module):
         r_t = self.EMM(self.hidden)
 
         x_t = x_t.view(-1, num_flat_features(x_t))
+        r_t = r_t.view(-1, num_flat_features(r_t))
 
         self.hidden = self.controller.forward(x_t, r_t)  # there's a 2D vs 4D problem in controller...
-        self.hidden = self.hidden.view(-1, num_flat_features(self.hidden))
         out = Funct.sigmoid(self.hid_to_out(self.hidden))
 
         self.hidden = Variable(self.hidden.data)
@@ -194,9 +193,9 @@ class GPU_NTM(nn.Module):
         x = x.permute(1, 0, 2, 3)
 
         outs = torch.stack(
-            [
+            tuple(
                 self.step(x_t) for x_t in torch.unbind(x, 0)
-                ], 0)
+            ), 0)
 
         outs = outs.permute(1, 0, 2)
 
