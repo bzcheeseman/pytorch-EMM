@@ -102,11 +102,11 @@ class NTM(nn.Module):
 
         self.EMM = EMM_NTM(self.num_hidden, self.batch_size, num_reads=self.num_reads,
                            num_shifts=3, memory_dims=self.memory_dims)
-        # self.EMM.register_backward_hook(print)
+        self.EMM.register_backward_hook(print)
 
         self.controller = FeedForwardController(self.num_inputs, self.num_hidden, self.batch_size,
                                                 num_reads=self.num_reads, memory_dims=self.memory_dims)
-        # self.controller.register_backward_hook(print)
+        self.controller.register_backward_hook(print)
 
         self.hid_to_out = nn.Linear(self.num_hidden, self.num_outputs)
 
@@ -120,8 +120,10 @@ class NTM(nn.Module):
             h_t = self.controller(x_t, r_t)
             h_t = h_t.view(-1, num_flat_features(h_t))
 
-            self.hidden = Variable(h_t.data, requires_grad=True)
+            # decouple hidden from its history at the end of forward
             out = Funct.sigmoid(self.hid_to_out(self.hidden))
+
+            self.hidden = Variable(h_t.data, requires_grad=True)
             return out
 
         outs = torch.stack(
@@ -138,6 +140,7 @@ class GPU_NTM(nn.Module):
     def __init__(self,
                  num_inputs,
                  num_hidden,
+                 num_outputs,
                  batch_size,
                  mem_banks,
                  num_reads,
@@ -146,7 +149,7 @@ class GPU_NTM(nn.Module):
 
         self.num_inputs = num_inputs
         self.num_hidden = num_hidden
-        self.num_outputs = num_inputs
+        self.num_outputs = num_outputs
         self.batch_size = batch_size
         self.mem_banks = mem_banks
         self.num_reads = num_reads
@@ -192,7 +195,7 @@ def train_gpu(batch, num_inputs, seq_len, num_hidden):
     import matplotlib.pyplot as plt
     from torch.utils.data import DataLoader
 
-    ntm = GPU_NTM(num_inputs, num_hidden, batch, num_reads=3, mem_banks=20)
+    ntm = GPU_NTM(num_inputs, num_hidden, num_inputs, batch, num_reads=3, mem_banks=20)
 
     try:
         ntm.load_state_dict(torch.load("models/copy_seqlen_{}.dat".format(seq_len)))
@@ -209,7 +212,7 @@ def train_gpu(batch, num_inputs, seq_len, num_hidden):
     for length in range(7, max_seq_len):
         running_loss = 0.0
 
-        test = CopyTask(length, [num_inputs - 1, 1], num_samples=2e4)
+        test = CopyTask(length, [num_inputs, 1], num_samples=2e4)
 
         data_loader = DataLoader(test, batch_size=batch, shuffle=True, num_workers=4)
 
@@ -298,11 +301,10 @@ def train_ntm(batch, num_inputs, seq_len, num_hidden):
 
     ntm.train()
 
-    shift_layer = ntm._modules.get("EMM.shift")
-    shift_layer.register_backward_hook(print)
-
-    criterion = nn.L1Loss()
     state = ntm.state_dict()
+    print(state['EMM.shift.bias'])
+
+    criterion = nn.MSELoss()
     optimizer = optim.RMSprop(ntm.parameters(), lr=5e-3, weight_decay=0.0005)
     # weight_decay=0.0005 seems to be a good balance
 
@@ -328,12 +330,18 @@ def train_ntm(batch, num_inputs, seq_len, num_hidden):
                 loss.backward()
                 optimizer.step()
 
+                print(ntm.state_dict()['EMM.shift.bias'])
+
+                # assert not (ntm.state_dict()['EMM.shift.bias'] == state['EMM.shift.bias'])[0]
+
                 running_loss += loss.data[0]
 
-                if i % 1000 == 999:
+                if i % 100 == 99:
 
                     print('[length: %d, epoch: %d, i: %5d] average loss: %.3f' % (length, epoch + 1, i + 1,
-                                                                                  running_loss / 1000))
+                                                                                  running_loss / 100))
+
+                    # print(ntm.EMM.memory)
 
                     plt.imshow(ntm.EMM.wr.squeeze(0).data.numpy())
                     plt.savefig("plots/ntm/{}_{}_{}_read.png".format(length, epoch+1, i + 1))
@@ -357,7 +365,7 @@ def train_ntm(batch, num_inputs, seq_len, num_hidden):
                     plt.savefig("plots/ntm/{}_{}_{}_true_output.png".format(length, epoch+1, i + 1))
                     plt.close()
 
-                    if running_loss/1000 <= 0.005:
+                    if running_loss/100 <= 0.005:
                         break
 
                     running_loss = 0.0

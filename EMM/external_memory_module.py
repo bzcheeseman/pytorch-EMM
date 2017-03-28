@@ -33,14 +33,14 @@ class EMM_NTM(nn.Module):
         self.num_reads = num_reads
 
         # Memory for the external memory module
-        self.memory = Variable(torch.rand(*self.memory_dims), requires_grad=True)
+        self.memory = Variable(torch.ones(*self.memory_dims) * 1e-6)
 
         # Read/write weights
-        self.ww = Variable(torch.rand(self.batch_size, self.memory_dims[0]), requires_grad=True)
-        # self.ww = Funct.softmax(self.ww)
+        self.ww = Variable(torch.rand(self.batch_size, self.memory_dims[0]))
+        self.ww = Funct.softmax(self.ww)
 
-        self.wr = Variable(torch.rand(num_reads, self.batch_size, self.memory_dims[0]), requires_grad=True)
-        # self.wr = Funct.softmax(self.wr)
+        self.wr = Variable(torch.rand(num_reads, self.batch_size, self.memory_dims[0]))
+        self.wr = Funct.softmax(self.wr)
 
         # Key - Clipped Linear or Relu
         self.key = nn.Linear(self.num_hidden, self.memory_dims[1])
@@ -85,30 +85,27 @@ class EMM_NTM(nn.Module):
         w_tilde = circular_convolution(w_g, s_t)
 
         # Sharpening
-        gamma_tr = gamma_t.repeat(1, self.memory_dims[0])
-        w = w_tilde.pow(gamma_tr)
-        w = torch.div(w, torch.sum(w).data[0] + 1e-5)
-
-        w.register_hook(print)
+        w = w_tilde.pow(gamma_t.expand_as(w_tilde))
+        w = torch.div(w, torch.sum(w).data[0] + 1e-4)
 
         return w
 
     def _write_to_mem(self, h_t, w_tm1, m_t):
         h_t = h_t.view(-1, num_flat_features(h_t))
 
-        e_t = Funct.sigmoid(self.hid_to_erase(h_t))
+        e_t = torch.clamp(Funct.sigmoid(self.hid_to_erase(h_t)), min=0.0, max=1.0)
         a_t = torch.clamp(Funct.relu(self.hid_to_add(h_t)), min=0.0, max=1.0)
 
-        mem_erase = torch.zeros(*m_t.size())
-        mem_add = torch.zeros(*m_t.size())
+        mem_erase = Variable(torch.zeros(*m_t.size()))
+        mem_add = Variable(torch.zeros(*m_t.size()))
 
-        for i in range(e_t.size()[0]):  # batch size
-            mem_erase += torch.ger(w_tm1[i].data, e_t[i].data)
-            mem_add += torch.ger(w_tm1[i].data, a_t[i].data)
+        for i in range(e_t.size()[0]):
+            mem_erase += torch.ger(w_tm1[i], e_t[i])
+            mem_add += torch.ger(w_tm1[i], a_t[i])
 
-        m_tp1 = m_t.data * (1.0 - mem_erase) + mem_add
+        m_t = m_t * (1.0 - mem_erase) + mem_add
 
-        return Variable(m_tp1, requires_grad=True)
+        return m_t
 
     def _read_from_mem(self, h_t, w_tm1, m_t):
         r_t = torch.mm(w_tm1, m_t)
@@ -131,8 +128,6 @@ class EMM_NTM(nn.Module):
                 self._read_from_mem(h_t, wr, self.memory) for wr in torch.unbind(self.wr, 0)
             ]
         )
-
-        r_t.register_hook(print)
 
         return r_t
 
