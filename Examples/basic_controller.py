@@ -39,7 +39,9 @@ class FeedForwardController(nn.Module):
     def forward(self, x, read):
 
         x = x.contiguous()
+        x = x.view(-1, num_flat_features(x))
         read = read.contiguous()
+        read = read.view(-1, num_flat_features(read))
 
         x = Funct.relu(self.in_to_hid(x) + self.read_to_hid(read))
 
@@ -61,27 +63,22 @@ class GRUController(nn.Module):
         self.batch_size = batch_size
         self.memory_dims = memory_dims
 
-        self.gru = nn.GRU(
+        self.gru = nn.GRUCell(
             input_size=self.num_inputs,
-            hidden_size=self.num_hidden,
-            num_layers=2,
-            batch_first=True
+            hidden_size=self.num_hidden
         )
 
         self.read_to_in = nn.Linear(self.memory_dims[1]*num_reads, self.num_inputs)
-        self.hidden = Variable(torch.zeros(2, self.batch_size, self.num_hidden))
 
-    def forward(self, x, read):
+    def forward(self, x, read, h_t):
         x = x.contiguous()
         r = Funct.relu(self.read_to_in(read))
         r = r.view(*x.size())
         x = x + r
-        x = x.view(self.batch_size, -1, self.num_inputs)
-        x, self.hidden = self.gru(x, self.hidden)
+        x = x.view(-1, num_flat_features(x))
+        h_tp1 = self.gru(x, h_t)
 
-        self.hidden = Variable(self.hidden.data)
-
-        return x
+        return h_tp1
 
 
 class NTM(nn.Module):
@@ -102,33 +99,26 @@ class NTM(nn.Module):
         self.num_reads = num_reads
         self.memory_dims = memory_dims
 
-        self.hidden = Variable(
-            torch.FloatTensor(batch_size, self.num_hidden).normal_(0.0, 1. / self.num_hidden))
+        self.hidden = Variable(torch.rand(batch_size, self.num_hidden))
 
-        # self.EMM = EMM_NTM(self.num_hidden, self.batch_size, num_reads=self.num_reads,
-        #                    num_shifts=3, memory_banks=self.mem_banks,
-        #                    memory_dims=self.memory_dims)
-
-        self.EMM = EMM_GPU(self.num_hidden, self.num_reads*self.memory_dims[1], self.batch_size,
-                           memory_banks=self.mem_banks, memory_dims=self.memory_dims)
+        self.EMM = EMM_NTM(self.num_hidden, self.batch_size, num_reads=self.num_reads,
+                           num_shifts=3, memory_banks=self.mem_banks,
+                           memory_dims=self.memory_dims)
 
         self.controller = FeedForwardController(self.num_inputs, self.num_hidden, self.batch_size,
-                                                num_reads=self.num_reads, memory_dims=self.memory_dims)
-
-        # self.controller = GRUController(self.num_inputs, self.num_hidden, self.batch_size,
-        #                                 num_reads=self.num_reads, memory_dims=self.memory_dims)
+                                        num_reads=self.num_reads, memory_dims=self.memory_dims)
 
         self.hid_to_out = nn.Linear(self.num_hidden, self.num_outputs)
 
     def step(self, x_t, bank_no):
 
-        r_t = self.EMM(self.hidden, bank_no)
+        r_t = self.EMM(self.hidden, bank_no)  # not going to memory?
 
-        self.hidden = self.controller(x_t, r_t)
-        h_t = self.hidden.view(-1, num_flat_features(self.hidden))
+        h_t = self.controller(x_t, r_t)
+        h_t = self.hidden.view(-1, num_flat_features(h_t))
 
-        self.hidden = Variable(self.hidden.data)
-        out = Funct.hardtanh(self.hid_to_out(h_t), min_val=0.0, max_val=1.0)
+        self.hidden = Variable(h_t.data)
+        out = Funct.sigmoid(self.hid_to_out(h_t))
         return out
 
     def forward(self, x):
@@ -152,7 +142,7 @@ class GPU_NTM(nn.Module):
                  batch_size,
                  mem_banks,
                  num_reads,
-                 memory_dims=(128, 20)):
+                 memory_dims=(20, 20)):
         super(GPU_NTM, self).__init__()
 
         self.num_inputs = num_inputs
@@ -164,27 +154,24 @@ class GPU_NTM(nn.Module):
         self.memory_dims = memory_dims
 
         self.hidden = Variable(
-            torch.FloatTensor(batch_size, self.num_hidden).normal_(0.0, 1. / self.num_hidden))
+            torch.zeros(batch_size, self.num_hidden))
 
         self.EMM = EMM_GPU(self.num_hidden, self.num_reads*self.memory_dims[1], self.batch_size,
                            memory_banks=self.mem_banks, memory_dims=self.memory_dims)
 
-        self.controller = FeedForwardController(self.num_inputs, self.num_hidden, self.batch_size,
+        self.controller = GRUController(self.num_inputs, self.num_hidden, self.batch_size,
                                                 num_reads=self.num_reads, memory_dims=self.memory_dims)
 
         self.hid_to_out = nn.Linear(self.num_hidden, self.num_outputs)
 
-    def step(self, x_t):
+    def step(self, x_t):  # track the backwards pass to figure out this 4d shit
 
-        r_t = self.EMM(self.hidden)
+        r_t = self.EMM(self.hidden)  # problem here, coming from controller...
 
-        x_t = x_t.view(-1, num_flat_features(x_t))
-        r_t = r_t.view(-1, num_flat_features(r_t))
-
-        self.hidden = self.controller.forward(x_t, r_t)  # there's a 2D vs 4D problem in controller...
+        self.hidden = self.controller.forward(x_t, r_t, self.hidden)
         out = Funct.sigmoid(self.hid_to_out(self.hidden))
 
-        self.hidden = Variable(self.hidden.data)
+        self.hidden = Variable(self.hidden.data).view(-1, num_flat_features(self.hidden))
 
         return out
 
@@ -206,7 +193,7 @@ def train_gpu(batch, num_inputs, seq_len, num_hidden):
     import matplotlib.pyplot as plt
     from torch.utils.data import DataLoader
 
-    ntm = GPU_NTM(num_inputs, num_hidden, batch, num_reads=3, mem_banks=4)
+    ntm = GPU_NTM(num_inputs, num_hidden, batch, num_reads=3, mem_banks=20)
 
     try:
         ntm.load_state_dict(torch.load("models/copy_seqlen_{}.dat".format(seq_len)))
@@ -303,7 +290,7 @@ def train_ntm(batch, num_inputs, seq_len, num_hidden):
     import matplotlib.pyplot as plt
     from torch.utils.data import DataLoader
 
-    ntm = NTM(num_inputs, num_hidden, batch, num_reads=1, mem_banks=4)
+    ntm = NTM(num_inputs, num_hidden, batch, num_reads=1, mem_banks=1)
 
     try:
         ntm.load_state_dict(torch.load("models/copy_seqlen_{}.dat".format(seq_len)))
@@ -312,8 +299,8 @@ def train_ntm(batch, num_inputs, seq_len, num_hidden):
 
     ntm.train()
 
-    criterion = nn.L1Loss()
-    optimizer = optim.RMSprop(ntm.parameters(), lr=5e-3)
+    criterion = nn.MSELoss()
+    optimizer = optim.RMSprop(ntm.parameters(), lr=1e-3)
     # weight_decay=0.0005 seems to be a good balance
 
     max_seq_len = 20  # change the training schedule to be curriculum training
@@ -340,12 +327,18 @@ def train_ntm(batch, num_inputs, seq_len, num_hidden):
 
                 running_loss += loss.data[0]
 
-                if i % 5000 == 4999:
+                if i % 1000 == 999:
                     print('[length: %d, epoch: %d, i: %5d] average loss: %.3f' % (length, epoch + 1, i + 1,
-                                                                                  running_loss / 5000))
+                                                                                  running_loss / 1000))
 
-                    plt.imshow(ntm.EMM.memory[0].data.numpy())
-                    plt.savefig("plots/ntm/{}_{}_{}_memory.png".format(length, epoch+1, i + 1))
+                    plt.imshow(ntm.EMM.wr.squeeze(0).data.numpy())
+                    plt.savefig("plots/ntm/{}_{}_{}_read.png".format(length, epoch+1, i + 1))
+                    plt.close()
+                    plt.imshow(ntm.EMM.memory.squeeze().data.numpy())
+                    plt.savefig("plots/ntm/{}_{}_{}_memory.png".format(length, epoch + 1, i + 1))
+                    plt.close()
+                    plt.imshow(ntm.EMM.ww.data.numpy())
+                    plt.savefig("plots/ntm/{}_{}_{}_write.png".format(length, epoch + 1, i + 1))
                     plt.close()
                     plottable_input = torch.squeeze(inputs.data[0]).numpy()
                     plottable_output = torch.squeeze(outputs.data[0]).numpy()
@@ -360,7 +353,7 @@ def train_ntm(batch, num_inputs, seq_len, num_hidden):
                     plt.savefig("plots/ntm/{}_{}_{}_true_output.png".format(length, epoch+1, i + 1))
                     plt.close()
 
-                    if running_loss/5000 <= 0.005:
+                    if running_loss/1000 <= 0.005:
                         break
 
                     running_loss = 0.0
@@ -395,8 +388,8 @@ def train_ntm(batch, num_inputs, seq_len, num_hidden):
     print("Total Loss: {}".format(total_loss / len(data_loader)))
 
 if __name__ == '__main__':
-    # train_ntm(1, 8, 5, 100)
-    train_gpu(1, 8, 5, 100)
+    train_ntm(1, 8, 5, 100)  # test this task on the old version of the ntm, see what happens
+    # train_gpu(1, 8, 5, 100)
 
     # OLD WAY OF SEQUENCING
     # total loss on 5x seq length is 0.017 with 1 memory bank, 1 epoch

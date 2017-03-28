@@ -10,4 +10,5 @@ __all__ = ["flat_features", "similarities"]
 
 from .flatfeatures import num_flat_features
 from .similarities import cosine_similarity
+from .circular_conv import circular_convolution
 from .tasks import CopyTask

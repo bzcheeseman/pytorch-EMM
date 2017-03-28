@@ -14,6 +14,7 @@ from torch.autograd import Variable
 import numpy as np
 
 from Utils import cosine_similarity
+from Utils import circular_convolution
 from Utils import num_flat_features
 
 
@@ -33,9 +34,10 @@ class EMM_NTM(nn.Module):
         self.batch_size = batch_size
         self.num_shifts = num_shifts
         self.num_reads = num_reads
+        self.valeria = True
 
         # Memory for the external memory module
-        self.memory = Variable(torch.ones(memory_banks, *self.memory_dims)) * 1e-4
+        self.memory = Variable(torch.ones(memory_banks, *self.memory_dims))
 
         # Batch normalization across the memory banks - forces them together
         self.bank_bn = nn.BatchNorm1d(memory_banks)
@@ -72,32 +74,24 @@ class EMM_NTM(nn.Module):
 
         h_t = h_t.view(-1, num_flat_features(h_t))
 
-        k_t = torch.clamp(self.key(h_t), 0.0, 1.0)  # vector size (memory_dims[1])
+        k_t = torch.clamp(Funct.relu(self.key(h_t)), 0.0, 1.0)  # vector size (memory_dims[1])
         beta_t = Funct.relu(self.beta(h_t))  # number
         g_t = torch.clamp(Funct.hardtanh(self.gate(h_t), min_val=0.0, max_val=1.0), min=0.0,
                           max=1.0)  # number
         s_t = Funct.softmax(self.shift(h_t))  # vector size (num_shifts)
         gamma_t = 1.0 + Funct.relu(self.gamma(h_t))  # number
 
-        batch_size = k_t.size()[0]
-
         # Content Addressing
         beta_tr = beta_t.repeat(1, self.memory_dims[0])  # problem is here, beta is not changing?
         w_c = Funct.softmax(cosine_similarity(k_t, m_t) * beta_tr)  # vector size (memory_dims[0])
 
         # Interpolation
-        g_tr = g_t.repeat(1, self.memory_dims[0])
-        w_g = g_tr * w_c + (1.0 - g_tr) * w_tm1  # vector size (memory_dims[0]) (i think)
+        g_tr = (1.0 - 1e-8) * g_t.repeat(1, self.memory_dims[0]) + 0.5 * 1e-8
+        w_g = g_tr * w_c + (1.0 - g_tr) * w_tm1  # vector size (batch x memory_dims[0]) (i think)
 
         # Convolutional Shift
-        conv_filter = s_t.unsqueeze(1).unsqueeze(2)
-        w_g_padded = w_g.unsqueeze(1).unsqueeze(2)
-        pad = (self.num_shifts // 2, (self.num_shifts - 1) // 2)
-
-        conv = Funct.conv2d(w_g_padded, conv_filter, padding=pad)
-
-        w_tilde = conv[:batch_size, 0, 0, :].contiguous()
-        w_tilde = w_tilde.view(batch_size, self.memory_dims[0])
+        # print(s_t)
+        w_tilde = circular_convolution(w_g, s_t)
 
         # Sharpening
         gamma_tr = gamma_t.repeat(1, self.memory_dims[0])
@@ -176,10 +170,12 @@ class EMM_GPU(nn.Module):
         self.hidden_to_read_f = nn.Linear(self.num_hidden, self.memory_banks * 3 * 3)
         self.hidden_to_read_w = nn.Linear(self.num_hidden, self.memory_banks * 7 * 7)
 
-        self.conv_focused_to_read = nn.Linear((self.memory_dims[0] - 3 + 1) * (self.memory_dims[1] - 3 + 1),
-                                              self.read_size)
-        self.conv_wide_to_read = nn.Linear((self.memory_dims[0] - 7 + 1) * (self.memory_dims[1] - 7 + 1),
-                                           self.read_size)
+        self.conv_focused_to_read = nn.Linear(
+            (self.memory_dims[0] - 3 + 1) * (self.memory_dims[1] - 3 + 1), self.read_size
+        )
+        self.conv_wide_to_read = nn.Linear(
+            (self.memory_dims[0] - 7 + 1) * (self.memory_dims[1] - 7 + 1), self.read_size
+        )
 
         # Writing ##############################################################################################
         self.hidden_focused_to_conv = nn.Linear(self.num_hidden,
@@ -216,16 +212,17 @@ class EMM_GPU(nn.Module):
 
         self.wide_read_filter = wrf_t * gw_t + self.wide_read_filter * (1.0 - gw_t)
 
-        focused_read = Funct.relu(Funct.conv2d(self.memory, self.focused_read_filter)).squeeze(1)
+        focused = Funct.relu(Funct.conv2d(self.memory, self.focused_read_filter))
         # (126, 18) = memory_dims - 3 + 1
-
-        wide_read = Funct.relu(Funct.conv2d(self.memory, self.wide_read_filter)).squeeze(1)
+        #
+        wide = Funct.relu(Funct.conv2d(self.memory, self.wide_read_filter))
         # (122, 14) = memory_dims - 7 + 1
 
-        focused_read = focused_read.view(-1, num_flat_features(focused_read))
-        wide_read = wide_read.view(-1, num_flat_features(wide_read))
+        focused_read = focused.view(-1, num_flat_features(focused))
+        wide_read = wide.view(-1, num_flat_features(wide))
 
-        read = Funct.relu(self.conv_focused_to_read(focused_read)) + Funct.relu(self.conv_wide_to_read(wide_read))
+        # problem right here - tensor is somehow 4D on the backward pass, but only when it comes through the controller
+        read = self.conv_wide_to_read(wide_read) + Funct.relu(self.conv_focused_to_read(focused_read))
 
         return read
 
