@@ -18,8 +18,6 @@ class CopyTask(Dataset):
         self.num_samples = num_samples
 
         self.input_tensor = torch.FloatTensor(*input_size).uniform_(0, 1)
-        self.input_tensor = torch.cat([self.input_tensor, torch.zeros(1, 1)], 0)
-        self.input_size[0] += 1
 
     def __getitem__(self, index):
         sample = []
@@ -32,12 +30,15 @@ class CopyTask(Dataset):
             sample.append(torch.bernoulli(self.input_tensor))
             sample_label.append(zeros)
 
+        sample.append(torch.ones(*self.input_size) * 0.5)
+        sample_label.append(zeros)
+
         for i in range(rand_seq_len):
             sample_label.append(sample[i])
             sample.append(zeros)
 
-        sample = torch.stack(sample).view(2*rand_seq_len, *self.input_size)
-        sample_label = torch.cat(sample_label).view(2*rand_seq_len, *self.input_size)
+        sample = torch.stack(sample).view(2*rand_seq_len + 1, *self.input_size)
+        sample_label = torch.cat(sample_label).view(2*rand_seq_len + 1, *self.input_size)
 
         return sample, sample_label
 

@@ -85,50 +85,49 @@ class NTM(nn.Module):
     def __init__(self,
                  num_inputs,
                  num_hidden,
+                 num_outputs,
                  batch_size,
-                 mem_banks,
                  num_reads,
                  memory_dims=(128, 20)):
         super(NTM, self).__init__()
 
         self.num_inputs = num_inputs
         self.num_hidden = num_hidden
-        self.num_outputs = num_inputs
+        self.num_outputs = num_outputs
         self.batch_size = batch_size
-        self.mem_banks = mem_banks
         self.num_reads = num_reads
         self.memory_dims = memory_dims
 
-        self.hidden = Variable(torch.rand(batch_size, self.num_hidden))
+        self.hidden = Variable(torch.rand(batch_size, self.num_hidden), requires_grad=True)
 
         self.EMM = EMM_NTM(self.num_hidden, self.batch_size, num_reads=self.num_reads,
-                           num_shifts=3, memory_banks=self.mem_banks,
-                           memory_dims=self.memory_dims)
+                           num_shifts=3, memory_dims=self.memory_dims)
+        # self.EMM.register_backward_hook(print)
 
         self.controller = FeedForwardController(self.num_inputs, self.num_hidden, self.batch_size,
-                                        num_reads=self.num_reads, memory_dims=self.memory_dims)
+                                                num_reads=self.num_reads, memory_dims=self.memory_dims)
+        # self.controller.register_backward_hook(print)
 
         self.hid_to_out = nn.Linear(self.num_hidden, self.num_outputs)
-
-    def step(self, x_t, bank_no):
-
-        r_t = self.EMM(self.hidden, bank_no)  # not going to memory?
-
-        h_t = self.controller(x_t, r_t)
-        h_t = self.hidden.view(-1, num_flat_features(h_t))
-
-        self.hidden = Variable(h_t.data)
-        out = Funct.sigmoid(self.hid_to_out(h_t))
-        return out
 
     def forward(self, x):
 
         x = x.permute(1, 0, 2, 3)
 
+        def step(x_t):
+            r_t = self.EMM(self.hidden)
+
+            h_t = self.controller(x_t, r_t)
+            h_t = h_t.view(-1, num_flat_features(h_t))
+
+            self.hidden = Variable(h_t.data, requires_grad=True)
+            out = Funct.sigmoid(self.hid_to_out(self.hidden))
+            return out
+
         outs = torch.stack(
             [
-                self.step(x[t], t % self.mem_banks) for t in np.arange(x.size()[0])
-                ], 0)
+                step(x_t) for x_t in torch.unbind(x, 0)
+            ], 0)
 
         outs = outs.permute(1, 0, 2)
 
@@ -290,7 +289,7 @@ def train_ntm(batch, num_inputs, seq_len, num_hidden):
     import matplotlib.pyplot as plt
     from torch.utils.data import DataLoader
 
-    ntm = NTM(num_inputs, num_hidden, batch, num_reads=1, mem_banks=1)
+    ntm = NTM(num_inputs, num_hidden, num_inputs, batch, num_reads=1)
 
     try:
         ntm.load_state_dict(torch.load("models/copy_seqlen_{}.dat".format(seq_len)))
@@ -299,15 +298,19 @@ def train_ntm(batch, num_inputs, seq_len, num_hidden):
 
     ntm.train()
 
-    criterion = nn.MSELoss()
-    optimizer = optim.RMSprop(ntm.parameters(), lr=1e-3)
+    shift_layer = ntm._modules.get("EMM.shift")
+    shift_layer.register_backward_hook(print)
+
+    criterion = nn.L1Loss()
+    state = ntm.state_dict()
+    optimizer = optim.RMSprop(ntm.parameters(), lr=5e-3, weight_decay=0.0005)
     # weight_decay=0.0005 seems to be a good balance
 
     max_seq_len = 20  # change the training schedule to be curriculum training
-    for length in range(7, max_seq_len):
+    for length in range(10, max_seq_len):
         running_loss = 0.0
 
-        test = CopyTask(length, [num_inputs-1, 1], num_samples=2e4)
+        test = CopyTask(length, [num_inputs, 1], num_samples=2e4)
 
         data_loader = DataLoader(test, batch_size=batch, shuffle=True, num_workers=4)
 
@@ -315,10 +318,10 @@ def train_ntm(batch, num_inputs, seq_len, num_hidden):
 
             for i, data in enumerate(data_loader, 0):
                 inputs, labels = data
-                inputs = Variable(inputs)
+                inputs = Variable(inputs, requires_grad=True)
                 labels = Variable(labels)
 
-                ntm.zero_grad()
+                optimizer.zero_grad()
                 outputs = ntm(inputs)
 
                 loss = criterion(outputs, labels)
@@ -328,13 +331,14 @@ def train_ntm(batch, num_inputs, seq_len, num_hidden):
                 running_loss += loss.data[0]
 
                 if i % 1000 == 999:
+
                     print('[length: %d, epoch: %d, i: %5d] average loss: %.3f' % (length, epoch + 1, i + 1,
                                                                                   running_loss / 1000))
 
                     plt.imshow(ntm.EMM.wr.squeeze(0).data.numpy())
                     plt.savefig("plots/ntm/{}_{}_{}_read.png".format(length, epoch+1, i + 1))
                     plt.close()
-                    plt.imshow(ntm.EMM.memory.squeeze().data.numpy())
+                    plt.imshow(ntm.EMM.memory.squeeze().data.numpy().T)
                     plt.savefig("plots/ntm/{}_{}_{}_memory.png".format(length, epoch + 1, i + 1))
                     plt.close()
                     plt.imshow(ntm.EMM.ww.data.numpy())
@@ -388,7 +392,7 @@ def train_ntm(batch, num_inputs, seq_len, num_hidden):
     print("Total Loss: {}".format(total_loss / len(data_loader)))
 
 if __name__ == '__main__':
-    train_ntm(1, 8, 5, 100)  # test this task on the old version of the ntm, see what happens
+    train_ntm(1, 8, 5, 100)
     # train_gpu(1, 8, 5, 100)
 
     # OLD WAY OF SEQUENCING
