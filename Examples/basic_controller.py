@@ -98,15 +98,13 @@ class NTM(nn.Module):
         self.num_reads = num_reads
         self.memory_dims = memory_dims
 
-        self.hidden = Variable(torch.rand(batch_size, self.num_hidden), requires_grad=True)
+        self.hidden = Variable(torch.zeros(batch_size, self.num_hidden))
 
         self.EMM = EMM_NTM(self.num_hidden, self.batch_size, num_reads=self.num_reads,
                            num_shifts=3, memory_dims=self.memory_dims)
-        self.EMM.register_backward_hook(print)
 
         self.controller = FeedForwardController(self.num_inputs, self.num_hidden, self.batch_size,
                                                 num_reads=self.num_reads, memory_dims=self.memory_dims)
-        self.controller.register_backward_hook(print)
 
         self.hid_to_out = nn.Linear(self.num_hidden, self.num_outputs)
 
@@ -116,14 +114,13 @@ class NTM(nn.Module):
 
         def step(x_t):
             r_t = self.EMM(self.hidden)
+            r_t.register_hook(print)
 
             h_t = self.controller(x_t, r_t)
             h_t = h_t.view(-1, num_flat_features(h_t))
+            self.hidden = h_t
 
-            # decouple hidden from its history at the end of forward
             out = Funct.sigmoid(self.hid_to_out(self.hidden))
-
-            self.hidden = Variable(h_t.data, requires_grad=True)
             return out
 
         outs = torch.stack(
@@ -133,6 +130,7 @@ class NTM(nn.Module):
 
         outs = outs.permute(1, 0, 2)
 
+        self.hidden = Variable(self.hidden.data)  # decouple history here
         return outs
 
 
@@ -162,31 +160,31 @@ class GPU_NTM(nn.Module):
                            memory_banks=self.mem_banks, memory_dims=self.memory_dims)
 
         self.controller = GRUController(self.num_inputs, self.num_hidden, self.batch_size,
-                                                num_reads=self.num_reads, memory_dims=self.memory_dims)
+                                        num_reads=self.num_reads, memory_dims=self.memory_dims)
 
         self.hid_to_out = nn.Linear(self.num_hidden, self.num_outputs)
-
-    def step(self, x_t):  # track the backwards pass to figure out this 4d shit
-
-        r_t = self.EMM(self.hidden)  # problem here, coming from controller...
-
-        self.hidden = self.controller.forward(x_t, r_t, self.hidden)
-        out = Funct.sigmoid(self.hid_to_out(self.hidden))
-
-        self.hidden = Variable(self.hidden.data).view(-1, num_flat_features(self.hidden))
-
-        return out
 
     def forward(self, x):
 
         x = x.permute(1, 0, 2, 3)
 
+        def step(x_t):  # track the backwards pass to figure out this 4d shit
+
+            r_t = self.EMM(self.hidden)
+
+            self.hidden = self.controller(x_t, r_t, self.hidden)  # grad_output is 4d tensor?
+            out = Funct.sigmoid(self.hid_to_out(self.hidden))
+
+            return out
+
         outs = torch.stack(
             tuple(
-                self.step(x_t) for x_t in torch.unbind(x, 0)
+                step(x_t) for x_t in torch.unbind(x, 0)
             ), 0)
 
         outs = outs.permute(1, 0, 2)
+
+        self.hidden = Variable(self.hidden.data)
 
         return outs
 
@@ -302,10 +300,9 @@ def train_ntm(batch, num_inputs, seq_len, num_hidden):
     ntm.train()
 
     state = ntm.state_dict()
-    print(state['EMM.shift.bias'])
 
     criterion = nn.MSELoss()
-    optimizer = optim.RMSprop(ntm.parameters(), lr=5e-3, weight_decay=0.0005)
+    optimizer = optim.RMSprop(ntm.parameters(), lr=1e-3, weight_decay=0.0005)
     # weight_decay=0.0005 seems to be a good balance
 
     max_seq_len = 20  # change the training schedule to be curriculum training
@@ -320,19 +317,18 @@ def train_ntm(batch, num_inputs, seq_len, num_hidden):
 
             for i, data in enumerate(data_loader, 0):
                 inputs, labels = data
-                inputs = Variable(inputs, requires_grad=True)
+                inputs = Variable(inputs)
                 labels = Variable(labels)
 
                 optimizer.zero_grad()
+                ntm.zero_grad()
                 outputs = ntm(inputs)
 
                 loss = criterion(outputs, labels)
                 loss.backward()
                 optimizer.step()
 
-                print(ntm.state_dict()['EMM.shift.bias'])
-
-                # assert not (ntm.state_dict()['EMM.shift.bias'] == state['EMM.shift.bias'])[0]
+                # assert not (ntm.state_dict()['hid_to_out.bias'] == state['hid_to_out.bias'])[0]
 
                 running_loss += loss.data[0]
 
@@ -340,8 +336,6 @@ def train_ntm(batch, num_inputs, seq_len, num_hidden):
 
                     print('[length: %d, epoch: %d, i: %5d] average loss: %.3f' % (length, epoch + 1, i + 1,
                                                                                   running_loss / 100))
-
-                    # print(ntm.EMM.memory)
 
                     plt.imshow(ntm.EMM.wr.squeeze(0).data.numpy())
                     plt.savefig("plots/ntm/{}_{}_{}_read.png".format(length, epoch+1, i + 1))
@@ -400,8 +394,8 @@ def train_ntm(batch, num_inputs, seq_len, num_hidden):
     print("Total Loss: {}".format(total_loss / len(data_loader)))
 
 if __name__ == '__main__':
-    train_ntm(1, 8, 5, 100)
-    # train_gpu(1, 8, 5, 100)
+    # train_ntm(1, 8, 5, 100)
+    train_gpu(1, 8, 5, 100)
 
     # OLD WAY OF SEQUENCING
     # total loss on 5x seq length is 0.017 with 1 memory bank, 1 epoch

@@ -37,10 +37,10 @@ class EMM_NTM(nn.Module):
 
         # Read/write weights
         self.ww = Variable(torch.rand(self.batch_size, self.memory_dims[0]))
-        self.ww = Funct.softmax(self.ww)
+        # self.ww = Funct.softmax(self.ww)
 
         self.wr = Variable(torch.rand(num_reads, self.batch_size, self.memory_dims[0]))
-        self.wr = Funct.softmax(self.wr)
+        # self.wr = Funct.softmax(self.wr)
 
         # Key - Clipped Linear or Relu
         self.key = nn.Linear(self.num_hidden, self.memory_dims[1])
@@ -67,16 +67,15 @@ class EMM_NTM(nn.Module):
 
         h_t = h_t.view(-1, num_flat_features(h_t))
 
-        k_t = torch.clamp(Funct.relu(self.key(h_t)), 0.0, 1.0)  # vector size (memory_dims[1])
-        beta_t = Funct.relu(self.beta(h_t))  # number
-        g_t = torch.clamp(Funct.hardtanh(self.gate(h_t), min_val=0.0, max_val=1.0), min=0.0,
-                          max=1.0)  # number
-        s_t = Funct.softmax(self.shift(h_t))  # vector size (num_shifts)
-        gamma_t = 1.0 + Funct.relu(self.gamma(h_t))  # number
+        k_t = torch.clamp(Funct.relu(self.key(h_t)), 0.0, 1.0)  # vector size (batch x memory_dims[1])
+        beta_t = Funct.relu(self.beta(h_t))  # batch x number
+        g_t = torch.clamp(Funct.hardtanh(self.gate(h_t), min_val=0.0, max_val=1.0), min=0.0, max=1.0)  # batch x number
+        s_t = Funct.softmax(self.shift(h_t))  # vector size (batch x num_shifts)
+        gamma_t = 1.0 + Funct.relu(self.gamma(h_t))  # batch x number
 
         # Content Addressing
         beta_tr = beta_t.repeat(1, self.memory_dims[0])
-        w_c = Funct.softmax(cosine_similarity(k_t, m_t) * beta_tr)  # vector size (memory_dims[0])
+        w_c = Funct.softmax(cosine_similarity(k_t, m_t) * beta_tr)  # vector size (batch x memory_dims[0])
 
         # Interpolation
         w_g = g_t.expand_as(w_c) * w_c + (1.0 - g_t).expand_as(w_tm1) * w_tm1  # vector size (batch x memory_dims[0])
@@ -85,15 +84,15 @@ class EMM_NTM(nn.Module):
         w_tilde = circular_convolution(w_g, s_t)
 
         # Sharpening
-        w = w_tilde.pow(gamma_t.expand_as(w_tilde))
-        w = torch.div(w, torch.sum(w).data[0] + 1e-4)
+        w = torch.div(w_tilde.pow(gamma_t.expand_as(w_tilde)),
+                      torch.sum(w_tilde.pow(gamma_t.expand_as(w_tilde))).data[0])
 
         return w
 
     def _write_to_mem(self, h_t, w_tm1, m_t):
         h_t = h_t.view(-1, num_flat_features(h_t))
 
-        e_t = torch.clamp(Funct.sigmoid(self.hid_to_erase(h_t)), min=0.0, max=1.0)
+        e_t = torch.clamp(Funct.hardtanh(self.hid_to_erase(h_t), min_val=0.0, max_val=1.0), min=0.0, max=1.0)
         a_t = torch.clamp(Funct.relu(self.hid_to_add(h_t)), min=0.0, max=1.0)
 
         mem_erase = Variable(torch.zeros(*m_t.size()))
@@ -120,16 +119,16 @@ class EMM_NTM(nn.Module):
         self.wr = torch.stack(
             [
                 self._weight_update(h_t, wr, self.memory) for wr in torch.unbind(self.wr, 0)
-            ]
+            ], 0
         )
 
         r_t = torch.stack(
             [
                 self._read_from_mem(h_t, wr, self.memory) for wr in torch.unbind(self.wr, 0)
-            ]
+            ], 1
         )
 
-        return r_t
+        return r_t.squeeze(1)  # batch_size x num_reads
 
 
 class EMM_GPU(nn.Module):
@@ -186,8 +185,8 @@ class EMM_GPU(nn.Module):
 
     def _read_from_mem(self, gf_t, gw_t, h_t):
 
-        frf_t = Funct.sigmoid(self.hidden_to_read_f(h_t))
-        wrf_t = Funct.sigmoid(self.hidden_to_read_w(h_t))
+        frf_t = Funct.hardtanh(self.hidden_to_read_f(h_t), min_val=0.0, max_val=1.0)
+        wrf_t = Funct.hardtanh(self.hidden_to_read_w(h_t), min_val=0.0, max_val=1.0)
 
         frf_t = frf_t.view(*self.focused_read_filter.size())
         wrf_t = wrf_t.view(*self.wide_read_filter.size())
@@ -215,47 +214,37 @@ class EMM_GPU(nn.Module):
 
     def _write_to_mem(self, gf_t, gw_t, h_t):
 
-        # compute filter parameters
-        fwf_t = Funct.sigmoid(self.hidden_to_write_f(h_t))
-        wwf_t = Funct.sigmoid(self.hidden_to_write_w(h_t))
-
-        fwf_t = fwf_t.view(*self.focused_write_filter.size())
-        wwf_t = wwf_t.view(*self.wide_write_filter.size())
-
-        gf_t = gf_t.repeat(*fwf_t.size())
-        gw_t = gw_t.repeat(*wwf_t.size())
+        # Compute filter parameters
+        fwf_t = Funct.hardtanh(self.hidden_to_write_f(h_t), min_val=0.0, max_val=1.0)
+        wwf_t = Funct.hardtanh(self.hidden_to_write_w(h_t), min_val=0.0, max_val=1.0)
 
         # Gate the filters
-        self.focused_write_filter = fwf_t * gf_t + self.focused_write_filter * (1.0 - gf_t)
+        self.focused_write_filter = fwf_t.view(*self.focused_write_filter.size()) * gf_t.expand_as(fwf_t) + \
+                                    self.focused_write_filter * (1.0 - gf_t.expand_as(self.focused_write_filter))
 
-        self.wide_write_filter = wwf_t * gw_t + self.wide_write_filter * (1.0 - gw_t)
+        self.wide_write_filter = wwf_t.view(*self.wide_write_filter.size()) * gw_t.expand_as(wwf_t) + \
+                                 self.wide_write_filter * (1.0 - gw_t.expand_as(self.wide_write_filter))
 
-        # turn h into write matrices
+        # Turn h into write matrices
         mwf_t = Funct.relu(self.hidden_focused_to_conv(h_t))
         mww_t = Funct.relu(self.hidden_wide_to_conv(h_t))
 
-        mwf_t = mwf_t.view(1, 1, (self.memory_dims[0] + 3 - 1), (self.memory_dims[1] + 3 - 1))
-        mww_t = mww_t.view(1, 1, (self.memory_dims[0] + 7 - 1), (self.memory_dims[1] + 7 - 1))
+        # Convolve converted h into the correct form
+        focused_write = Funct.conv2d(
+            mwf_t.view(1, 1, (self.memory_dims[0] + 3 - 1), (self.memory_dims[1] + 3 - 1)), self.focused_write_filter
+        )
+        wide_write = Funct.conv2d(
+            mww_t.view(1, 1, (self.memory_dims[0] + 7 - 1), (self.memory_dims[1] + 7 - 1)), self.wide_write_filter
+        )
 
-        # convolve converted h into the correct form
-        focused_write = Funct.conv2d(mwf_t, self.focused_write_filter)
-        wide_write = Funct.conv2d(mww_t, self.wide_write_filter)
+        # And finally write it to the memory, add or erase
+        add = torch.clamp(Funct.relu(self.add_gate(h_t)), 0.0, 1.0)
+        erase = torch.clamp(Funct.hardtanh(self.erase_gate(h_t), min_val=0.0, max_val=1.0), 0.0, 1.0)
 
-        focused_write = focused_write
-        wide_write = wide_write
+        mem_write = focused_write * (1.0 - erase.expand_as(focused_write)) + add.expand_as(focused_write) + \
+              wide_write * (1.0 - erase.expand_as(wide_write)) + add.expand_as(wide_write)
 
-        # and finally add it to the memory, add or erase
-        add = self.add_gate(h_t)
-        erase = self.erase_gate(h_t)
-
-        add = add.repeat(*wide_write.size())
-        erase = erase.repeat(*focused_write.size())
-
-        m_t = focused_write * (1.0 - erase) + focused_write * add + wide_write * (1.0 - erase) + wide_write * add
-
-        m_t = Funct.softmax(m_t)  # not sure about this
-
-        self.memory = self.memory + m_t
+        self.memory = self.memory + mem_write
 
     def forward(self, h_t):  # something is making it so that one of the variables is being modified.
         h_t = h_t.view(-1, num_flat_features(h_t))
