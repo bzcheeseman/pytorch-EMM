@@ -153,8 +153,7 @@ class GPU_NTM(nn.Module):
         self.num_reads = num_reads
         self.memory_dims = memory_dims
 
-        self.hidden = Variable(
-            torch.zeros(batch_size, self.num_hidden))
+        self.hidden = Variable(torch.zeros(batch_size, self.num_hidden), requires_grad=True)
 
         self.EMM = EMM_GPU(self.num_hidden, self.num_reads*self.memory_dims[1], self.batch_size,
                            memory_banks=self.mem_banks, memory_dims=self.memory_dims)
@@ -172,7 +171,10 @@ class GPU_NTM(nn.Module):
 
             r_t = self.EMM(self.hidden)
 
-            self.hidden = self.controller(x_t, r_t, self.hidden)  # grad_output is 4d tensor?
+            self.hidden = self.controller(x_t, r_t, self.hidden)
+
+            self.hidden.register_hook(print)
+
             out = Funct.sigmoid(self.hid_to_out(self.hidden))
 
             return out
