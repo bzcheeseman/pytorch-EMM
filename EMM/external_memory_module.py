@@ -198,10 +198,10 @@ class EMM_GPU(nn.Module):
 
         self.wide_read_filter = wrf_t * gw_t + self.wide_read_filter * (1.0 - gw_t)
 
-        focused = Funct.relu(Funct.conv2d(self.memory, self.focused_read_filter))
+        focused = Funct.relu(Funct.conv_transpose2d(self.memory, self.focused_read_filter))
         # (126, 18) = memory_dims - 3 + 1
         #
-        wide = Funct.relu(Funct.conv2d(self.memory, self.wide_read_filter))
+        wide = Funct.relu(Funct.conv_transpose2d(self.memory, self.wide_read_filter))
         # (122, 14) = memory_dims - 7 + 1
 
         focused_read = focused.view(-1, num_flat_features(focused))
