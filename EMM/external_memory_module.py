@@ -175,32 +175,40 @@ class EMM_GPU(nn.Module):
         self.add_gate = nn.Linear(self.num_hidden, 1)
         self.erase_gate = nn.Linear(self.num_hidden, 1)
 
-        self.focused_write_filter = Variable(torch.ones(self.memory_banks, 1, 3, 3))  # (out, in, kh, kw)
-        self.wide_write_filter = Variable(torch.ones(self.memory_banks, 1, 7, 7))
         self.hidden_to_write_f = nn.Linear(self.num_hidden, self.memory_banks * 3 * 3)
         self.hidden_to_write_w = nn.Linear(self.num_hidden, self.memory_banks * 7 * 7)
 
         # Memory for the external memory module #################################################################
-        self.memory = Variable(torch.ones(batch_size, memory_banks, *self.memory_dims)) * 1e-5
 
-    def _read_from_mem(self, gf_t, gw_t, h_t):
+
+    def init_filters_mem(self):
+        focused_read_filter = Variable(torch.ones(1, self.memory_banks, 3, 3))  # (out, in, kh, kw)
+        wide_read_filter = Variable(torch.ones(1, self.memory_banks, 7, 7))
+        focused_write_filter = Variable(torch.ones(self.memory_banks, 1, 3, 3))  # (out, in, kh, kw)
+        wide_write_filter = Variable(torch.ones(self.memory_banks, 1, 7, 7))
+        memory = Variable(torch.ones(self.batch_size, self.memory_banks, *self.memory_dims)) * 1e-5
+
+        return focused_read_filter, wide_read_filter, focused_write_filter, wide_write_filter, memory
+
+
+    def _read_from_mem(self, gf_t, gw_t, h_t, frf, wrf, m):
 
         frf_t = Funct.hardtanh(self.hidden_to_read_f(h_t), min_val=0.0, max_val=1.0)
         wrf_t = Funct.hardtanh(self.hidden_to_read_w(h_t), min_val=0.0, max_val=1.0)
 
-        frf_t = frf_t.view(*self.focused_read_filter.size())
-        wrf_t = wrf_t.view(*self.wide_read_filter.size())
+        frf_t = frf_t.view(*frf.size())
+        wrf_t = wrf_t.view(*wrf.size())
 
-        self.focused_read_filter = frf_t * gf_t.expand_as(frf_t) \
-                                   + self.focused_read_filter * (1.0 - gf_t.expand_as(frf_t))
+        frf_t = frf_t * gf_t.expand_as(frf_t) \
+                                   + frf * (1.0 - gf_t.expand_as(frf_t))
 
-        self.wide_read_filter = wrf_t * gw_t.expand_as(wrf_t) \
-                                + self.wide_read_filter * (1.0 - gw_t.expand_as(wrf_t))
+        wrf_t = wrf_t * gw_t.expand_as(wrf_t) \
+                                + wrf * (1.0 - gw_t.expand_as(wrf_t))
 
-        focused = Funct.relu(Funct.conv2d(self.memory, self.focused_read_filter))
+        focused = Funct.relu(Funct.conv2d(m, frf_t))
         # (126, 18) = memory_dims - 3 + 1
         #
-        wide = Funct.relu(Funct.conv2d(self.memory, self.wide_read_filter))
+        wide = Funct.relu(Funct.conv2d(m, wrf_t))
         # (122, 14) = memory_dims - 7 + 1
 
         focused_read = focused.view(-1, num_flat_features(focused))
@@ -209,23 +217,23 @@ class EMM_GPU(nn.Module):
         # problem right here - tensor is somehow 4D on the backward pass, but only when it comes through the controller
         read = self.conv_wide_to_read(wide_read) + Funct.relu(self.conv_focused_to_read(focused_read))
 
-        return read
+        return read, frf_t, wrf_t
 
-    def _write_to_mem(self, gf_t, gw_t, h_t):
+    def _write_to_mem(self, gf_t, gw_t, h_t, fwf, wwf, m):
 
         # Compute filter parameters
         fwf_t = Funct.hardtanh(self.hidden_to_write_f(h_t), min_val=0.0, max_val=1.0)
         wwf_t = Funct.hardtanh(self.hidden_to_write_w(h_t), min_val=0.0, max_val=1.0)
 
-        fwf_t = fwf_t.view(*self.focused_write_filter.size())
-        wwf_t = wwf_t.view(*self.wide_write_filter.size())
+        fwf_t = fwf_t.view(*fwf.size())
+        wwf_t = wwf_t.view(*wwf.size())
 
         # Gate the filters
-        self.focused_write_filter = fwf_t * gf_t.expand_as(fwf_t) + \
-                                    self.focused_write_filter * (1.0 - gf_t.expand_as(self.focused_write_filter))
+        fwf_t = fwf_t * gf_t.expand_as(fwf_t) + \
+                                    fwf * (1.0 - gf_t.expand_as(fwf))
 
-        self.wide_write_filter = wwf_t * gw_t.expand_as(wwf_t) + \
-                                 self.wide_write_filter * (1.0 - gw_t.expand_as(self.wide_write_filter))
+        wwf_t = wwf_t * gw_t.expand_as(wwf_t) + \
+                                 wwf * (1.0 - gw_t.expand_as(wwf))
 
         # Turn h into write matrices
         mwf_t = Funct.relu(self.hidden_focused_to_conv(h_t))
@@ -234,11 +242,11 @@ class EMM_GPU(nn.Module):
         # Convolve converted h into the correct form
         focused_write = Funct.conv2d(
             mwf_t.view(1, 1, (self.memory_dims[0] + 3 - 1), (self.memory_dims[1] + 3 - 1)),
-            self.focused_write_filter
+            fwf_t
         )
         wide_write = Funct.conv2d(
             mww_t.view(1, 1, (self.memory_dims[0] + 7 - 1), (self.memory_dims[1] + 7 - 1)),
-            self.wide_write_filter
+            wwf_t
         )
 
         # And finally write it to the memory, add or erase
@@ -248,23 +256,18 @@ class EMM_GPU(nn.Module):
         mem_write = focused_write * (1.0 - erase.expand_as(focused_write)) + add.expand_as(focused_write) + \
               wide_write * (1.0 - erase.expand_as(wide_write)) + add.expand_as(wide_write)
 
-        m_t = self.memory + mem_write
-        return m_t
+        m_t = m + mem_write
+        return m_t, fwf_t, wwf_t
 
-    def forward(self, h_t):  # something is making it so that one of the variables is being modified.
+    def forward(self, h_t, frf, wrf, fwf, wwf, m):
         h_t = h_t.view(-1, num_flat_features(h_t))
 
-        gf_t = Funct.sigmoid(self.focus_gate(h_t))
-        gw_t = Funct.sigmoid(self.wide_gate(h_t))
+        gf_t = torch.clamp(1.2 * Funct.sigmoid(self.focus_gate(h_t)) - 0.1, min=0.0, max=1.0)
+        gw_t = torch.clamp(1.2 * Funct.sigmoid(self.wide_gate(h_t)) - 0.1, min=0.0, max=1.0)
 
-        r_t = self._read_from_mem(gf_t, gw_t, h_t)
+        r_t, frf_t, wrf_t = self._read_from_mem(gf_t, gw_t, h_t, frf, wrf, m)
 
-        self.memory = self._write_to_mem(gf_t, gw_t, h_t)
+        m_t, fwf_t, wwf_t = self._write_to_mem(gf_t, gw_t, h_t, fwf, wwf, m)
 
-        return r_t
+        return r_t, frf_t, wrf_t, fwf_t, wwf_t, m_t
 
-
-if __name__ == "__main__":
-    emm = EMM_GPU(100, 50, 1, memory_banks=5)
-    hidden = Variable(torch.rand(1, 100))
-    emm.forward(hidden)

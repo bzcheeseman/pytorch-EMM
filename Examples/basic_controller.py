@@ -141,7 +141,7 @@ class GPU_NTM(nn.Module):
                  batch_size,
                  mem_banks,
                  num_reads,
-                 memory_dims=(20, 20)):
+                 memory_dims=(10, 10)):
         super(GPU_NTM, self).__init__()
 
         self.num_inputs = num_inputs
@@ -162,13 +162,29 @@ class GPU_NTM(nn.Module):
 
         self.hid_to_out = nn.Linear(self.num_hidden, self.num_outputs)
 
+        self.focused_read_filter, \
+        self.wide_read_filter, \
+        self.focused_write_filter, \
+        self.wide_write_filter, \
+        self.memory = self.EMM.init_filters_mem()
+
     def forward(self, x):
 
         x = x.permute(1, 0, 2, 3)
 
-        def step(x_t):  # track the backwards pass to figure out this 4d shit
+        def step(x_t):
 
-            r_t = self.EMM(self.hidden)
+            r_t,\
+            self.focused_read_filter,\
+            self.wide_read_filter,\
+            self.focused_write_filter,\
+            self.wide_write_filter,\
+            self.memory = self.EMM(self.hidden,
+                           self.focused_read_filter,
+                           self.wide_read_filter,
+                           self.focused_write_filter,
+                           self.wide_write_filter,
+                           self.memory)
 
             self.hidden = self.controller(x_t, r_t)
 
@@ -184,6 +200,11 @@ class GPU_NTM(nn.Module):
         outs = outs.permute(1, 0, 2)
 
         self.hidden = Variable(self.hidden.data)
+        self.focused_read_filter = Variable(self.focused_read_filter.data)
+        self.wide_read_filter = Variable(self.wide_read_filter.data)
+        self.focused_write_filter = Variable(self.focused_write_filter.data)
+        self.wide_write_filter = Variable(self.wide_write_filter.data)
+        self.memory = Variable(self.memory.data)
 
         return outs
 
@@ -192,7 +213,7 @@ def train_gpu(batch, num_inputs, seq_len, num_hidden):
     import matplotlib.pyplot as plt
     from torch.utils.data import DataLoader
 
-    ntm = GPU_NTM(num_inputs, num_hidden, num_inputs, batch, num_reads=3, mem_banks=20)
+    ntm = GPU_NTM(num_inputs, num_hidden, num_inputs, batch, num_reads=1, mem_banks=20)
 
     try:
         ntm.load_state_dict(torch.load("models/copy_seqlen_{}.dat".format(seq_len)))
@@ -202,11 +223,10 @@ def train_gpu(batch, num_inputs, seq_len, num_hidden):
     ntm.train()
 
     criterion = nn.L1Loss()
-    optimizer = optim.RMSprop(ntm.parameters(), lr=5e-3)
-    # weight_decay=0.0005 seems to be a good balance
+    optimizer = optim.RMSprop(ntm.parameters(), lr=1e-3, weight_decay=0.00001)
 
     max_seq_len = 20  # change the training schedule to be curriculum training
-    for length in range(7, max_seq_len):
+    for length in range(2, max_seq_len):
         running_loss = 0.0
 
         test = CopyTask(length, [num_inputs, 1], num_samples=2e4)
@@ -224,16 +244,16 @@ def train_gpu(batch, num_inputs, seq_len, num_hidden):
                 outputs = ntm(inputs)
 
                 loss = criterion(outputs, labels)
-                loss.backward(retain_variables=True)
+                loss.backward()
                 optimizer.step()
 
                 running_loss += loss.data[0]
 
-                if i % 5000 == 4999:
+                if i % 1000 == 999:
                     print('[length: %d, epoch: %d, i: %5d] average loss: %.3f' % (length, epoch + 1, i + 1,
-                                                                                  running_loss / 5000))
+                                                                                  running_loss / 1000))
 
-                    plt.imshow(ntm.EMM.memory[0].data.numpy())
+                    plt.imshow(ntm.memory[0, 0].data.numpy())
                     plt.savefig("plots/ntm/{}_{}_{}_memory.png".format(length, epoch + 1, i + 1))
                     plt.close()
                     plottable_input = torch.squeeze(inputs.data[0]).numpy()
@@ -249,12 +269,12 @@ def train_gpu(batch, num_inputs, seq_len, num_hidden):
                     plt.savefig("plots/ntm/{}_{}_{}_true_output.png".format(length, epoch + 1, i + 1))
                     plt.close()
 
-                    if running_loss / 5000 <= 0.005:
+                    if running_loss / 1000 <= 0.005:
                         break
 
                     running_loss = 0.0
 
-    torch.save(ntm.state_dict(), "models/copy_seqlen_{}.dat".format(seq_len))
+    torch.save(ntm.state_dict(), "models/gpu_copy_seqlen_{}.dat".format(seq_len))
     print("Finished Training")
 
     test = CopyTask(5 * max_seq_len, [num_inputs - 1, 1], num_samples=1e4)
