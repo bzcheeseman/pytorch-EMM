@@ -32,16 +32,6 @@ class EMM_NTM(nn.Module):
         self.num_shifts = num_shifts
         self.num_reads = num_reads
 
-        # Memory for the external memory module
-        self.memory = Variable(torch.ones(*self.memory_dims) * 1e-6)
-
-        # Read/write weights
-        self.ww = Variable(torch.rand(self.batch_size, self.memory_dims[0]))
-        # self.ww = Funct.softmax(self.ww)
-
-        self.wr = Variable(torch.rand(num_reads, self.batch_size, self.memory_dims[0]))
-        # self.wr = Funct.softmax(self.wr)
-
         # Key - Clipped Linear or Relu
         self.key = nn.Linear(self.num_hidden, self.memory_dims[1])
 
@@ -63,7 +53,17 @@ class EMM_NTM(nn.Module):
         # Add - Clipped Linear
         self.hid_to_add = nn.Linear(self.num_hidden, self.memory_dims[1])
 
-    def _weight_update(self, h_t, w_tm1, m_t):  # NONE OF THESE ARE CHANGING...
+    def init_weights_mem(self):
+        # Memory for the external memory module
+        memory = Variable(torch.ones(*self.memory_dims) * 1e-6)
+
+        # Read/write weights
+        ww = Variable(torch.rand(self.batch_size, self.memory_dims[0]))
+        wr = Variable(torch.rand(self.num_reads, self.batch_size, self.memory_dims[0]))
+
+        return wr, ww, memory
+
+    def _weight_update(self, h_t, w_tm1, m_t):
 
         h_t = h_t.view(-1, num_flat_features(h_t))
 
@@ -110,25 +110,25 @@ class EMM_NTM(nn.Module):
         r_t = torch.mm(w_tm1, m_t)
         return r_t
 
-    def forward(self, h_t):
+    def forward(self, h_t, wr, ww, m):
         # Update write weights and write to memory
-        self.ww = self._weight_update(h_t, self.ww, self.memory)
-        self.memory = self._write_to_mem(h_t, self.ww, self.memory)
+        ww_t = self._weight_update(h_t, ww, m)
+        m_t = self._write_to_mem(h_t, ww, m)
 
         # Update read weights and read from memory
-        self.wr = torch.stack(
+        wr_t = torch.stack(
             [
-                self._weight_update(h_t, wr, self.memory) for wr in torch.unbind(self.wr, 0)
+                self._weight_update(h_t, w, m) for w in torch.unbind(wr, 0)
             ], 0
         )
 
         r_t = torch.stack(
             [
-                self._read_from_mem(h_t, wr, self.memory) for wr in torch.unbind(self.wr, 0)
+                self._read_from_mem(h_t, w, m) for w in torch.unbind(wr, 0)
             ], 1
         )
 
-        return r_t.squeeze(1)  # batch_size x num_reads
+        return r_t.squeeze(1), wr_t, ww_t, m_t  # batch_size x num_reads
 
 
 class EMM_GPU(nn.Module):
@@ -151,8 +151,6 @@ class EMM_GPU(nn.Module):
         self.wide_gate = nn.Linear(self.num_hidden, 1)
 
         # Reading ##############################################################################################
-        self.focused_read_filter = Variable(torch.ones(1, self.memory_banks, 3, 3))  # (out, in, kh, kw)
-        self.wide_read_filter = Variable(torch.ones(1, self.memory_banks, 7, 7))
         self.hidden_to_read_f = nn.Linear(self.num_hidden, self.memory_banks * 3 * 3)
         self.hidden_to_read_w = nn.Linear(self.num_hidden, self.memory_banks * 7 * 7)
 
@@ -178,9 +176,6 @@ class EMM_GPU(nn.Module):
         self.hidden_to_write_f = nn.Linear(self.num_hidden, self.memory_banks * 3 * 3)
         self.hidden_to_write_w = nn.Linear(self.num_hidden, self.memory_banks * 7 * 7)
 
-        # Memory for the external memory module #################################################################
-
-
     def init_filters_mem(self):
         focused_read_filter = Variable(torch.ones(1, self.memory_banks, 3, 3))  # (out, in, kh, kw)
         wide_read_filter = Variable(torch.ones(1, self.memory_banks, 7, 7))
@@ -189,7 +184,6 @@ class EMM_GPU(nn.Module):
         memory = Variable(torch.ones(self.batch_size, self.memory_banks, *self.memory_dims)) * 1e-5
 
         return focused_read_filter, wide_read_filter, focused_write_filter, wide_write_filter, memory
-
 
     def _read_from_mem(self, gf_t, gw_t, h_t, frf, wrf, m):
 
