@@ -114,7 +114,6 @@ class NTM(nn.Module):
 
         def step(x_t):
             r_t = self.EMM(self.hidden)
-            r_t.register_hook(print)
 
             h_t = self.controller(x_t, r_t)
             h_t = h_t.view(-1, num_flat_features(h_t))
@@ -158,7 +157,7 @@ class GPU_NTM(nn.Module):
         self.EMM = EMM_GPU(self.num_hidden, self.num_reads*self.memory_dims[1], self.batch_size,
                            memory_banks=self.mem_banks, memory_dims=self.memory_dims)
 
-        self.controller = GRUController(self.num_inputs, self.num_hidden, self.batch_size,
+        self.controller = FeedForwardController(self.num_inputs, self.num_hidden, self.batch_size,
                                         num_reads=self.num_reads, memory_dims=self.memory_dims)
 
         self.hid_to_out = nn.Linear(self.num_hidden, self.num_outputs)
@@ -171,9 +170,7 @@ class GPU_NTM(nn.Module):
 
             r_t = self.EMM(self.hidden)
 
-            self.hidden = self.controller(x_t, r_t, self.hidden)
-
-            self.hidden.register_hook(print)
+            self.hidden = self.controller(x_t, r_t)
 
             out = Funct.sigmoid(self.hid_to_out(self.hidden))
 
@@ -227,7 +224,7 @@ def train_gpu(batch, num_inputs, seq_len, num_hidden):
                 outputs = ntm(inputs)
 
                 loss = criterion(outputs, labels)
-                loss.backward()
+                loss.backward(retain_variables=True)
                 optimizer.step()
 
                 running_loss += loss.data[0]
