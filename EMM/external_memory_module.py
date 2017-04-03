@@ -55,11 +55,13 @@ class EMM_NTM(nn.Module):
 
     def init_weights_mem(self):
         # Memory for the external memory module
-        memory = Variable(torch.ones(*self.memory_dims) * 1e-6)
+        memory = Variable(torch.rand(*self.memory_dims) * 1e-2, requires_grad=True)
 
         # Read/write weights
-        ww = Variable(torch.rand(self.batch_size, self.memory_dims[0]))
-        wr = Variable(torch.rand(self.num_reads, self.batch_size, self.memory_dims[0]))
+        ww = Variable(torch.eye(self.batch_size, self.memory_dims[0]), requires_grad=True)
+        wr = torch.zeros(self.num_reads, self.batch_size, self.memory_dims[0])
+        wr[:, 0, 0] = 1.0
+        wr = Variable(wr, requires_grad=True)
 
         return wr, ww, memory
 
@@ -137,7 +139,7 @@ class EMM_GPU(nn.Module):
                  read_size,
                  batch_size,
                  memory_banks=1,
-                 memory_dims=(128, 20)):
+                 memory_dims=(10, 10)):
         super(EMM_GPU, self).__init__()
 
         self.memory_dims = memory_dims
@@ -151,37 +153,37 @@ class EMM_GPU(nn.Module):
         self.wide_gate = nn.Linear(self.num_hidden, 1)
 
         # Reading ##############################################################################################
-        self.hidden_to_read_f = nn.Linear(self.num_hidden, self.memory_banks * 3 * 3)
-        self.hidden_to_read_w = nn.Linear(self.num_hidden, self.memory_banks * 7 * 7)
+        self.hidden_to_read_f = nn.Linear(self.num_hidden, self.memory_banks * 1 * 1)
+        self.hidden_to_read_w = nn.Linear(self.num_hidden, self.memory_banks * 5 * 5)
 
         self.conv_focused_to_read = nn.Linear(
-            (self.memory_dims[0] - 3 + 1) * (self.memory_dims[1] - 3 + 1), self.read_size
+            (self.memory_dims[0] - 1 + 1) * (self.memory_dims[1] - 1 + 1), self.read_size
         )
         self.conv_wide_to_read = nn.Linear(
-            (self.memory_dims[0] - 7 + 1) * (self.memory_dims[1] - 7 + 1), self.read_size
+            (self.memory_dims[0] - 5 + 1) * (self.memory_dims[1] - 5 + 1), self.read_size
         )
 
         # Writing ##############################################################################################
         self.hidden_focused_to_conv = nn.Linear(self.num_hidden,
-                                                (self.memory_dims[0] + 3 - 1)
-                                                * (self.memory_dims[1] + 3 - 1))
+                                                (self.memory_dims[0] + 1 - 1)
+                                                * (self.memory_dims[1] + 1 - 1))
         self.hidden_wide_to_conv = nn.Linear(self.num_hidden,
-                                             (self.memory_dims[0] + 7 - 1)
-                                             * (self.memory_dims[1] + 7 - 1))
+                                             (self.memory_dims[0] + 5 - 1)
+                                             * (self.memory_dims[1] + 5 - 1))
 
         # Add and erase gate for writing ##
         self.add_gate = nn.Linear(self.num_hidden, 1)
         self.erase_gate = nn.Linear(self.num_hidden, 1)
 
-        self.hidden_to_write_f = nn.Linear(self.num_hidden, self.memory_banks * 3 * 3)
-        self.hidden_to_write_w = nn.Linear(self.num_hidden, self.memory_banks * 7 * 7)
+        self.hidden_to_write_f = nn.Linear(self.num_hidden, self.memory_banks * 1 * 1)
+        self.hidden_to_write_w = nn.Linear(self.num_hidden, self.memory_banks * 5 * 5)
 
     def init_filters_mem(self):
-        focused_read_filter = Variable(torch.ones(1, self.memory_banks, 3, 3))  # (out, in, kh, kw)
-        wide_read_filter = Variable(torch.ones(1, self.memory_banks, 7, 7))
-        focused_write_filter = Variable(torch.ones(self.memory_banks, 1, 3, 3))  # (out, in, kh, kw)
-        wide_write_filter = Variable(torch.ones(self.memory_banks, 1, 7, 7))
-        memory = Variable(torch.ones(self.batch_size, self.memory_banks, *self.memory_dims)) * 1e-5
+        focused_read_filter = Variable(torch.ones(1, self.memory_banks, 1, 1), requires_grad=True)  # (out, in, kh, kw)
+        wide_read_filter = Variable(torch.ones(1, self.memory_banks, 5, 5), requires_grad=True)
+        focused_write_filter = Variable(torch.ones(self.memory_banks, 1, 1, 1), requires_grad=True)  # (out, in, kh, kw)
+        wide_write_filter = Variable(torch.ones(self.memory_banks, 1, 5, 5), requires_grad=True)
+        memory = Variable(torch.ones(self.batch_size, self.memory_banks, *self.memory_dims), requires_grad=True) * 1e-5
 
         return focused_read_filter, wide_read_filter, focused_write_filter, wide_write_filter, memory
 
@@ -203,7 +205,7 @@ class EMM_GPU(nn.Module):
         # (126, 18) = memory_dims - 3 + 1
         #
         wide = Funct.relu(Funct.conv2d(m, wrf_t))
-        # (122, 14) = memory_dims - 7 + 1
+        # (122, 14) = memory_dims - 5 + 1
 
         focused_read = focused.view(-1, num_flat_features(focused))
         wide_read = wide.view(-1, num_flat_features(wide))
@@ -235,11 +237,11 @@ class EMM_GPU(nn.Module):
 
         # Convolve converted h into the correct form
         focused_write = Funct.conv2d(
-            mwf_t.view(1, 1, (self.memory_dims[0] + 3 - 1), (self.memory_dims[1] + 3 - 1)),
+            mwf_t.view(1, 1, (self.memory_dims[0] + 1 - 1), (self.memory_dims[1] + 1 - 1)),
             fwf_t
         )
         wide_write = Funct.conv2d(
-            mww_t.view(1, 1, (self.memory_dims[0] + 7 - 1), (self.memory_dims[1] + 7 - 1)),
+            mww_t.view(1, 1, (self.memory_dims[0] + 5 - 1), (self.memory_dims[1] + 5 - 1)),
             wwf_t
         )
 

@@ -98,8 +98,6 @@ class NTM(nn.Module):
         self.num_reads = num_reads
         self.memory_dims = memory_dims
 
-        self.hidden = Variable(torch.zeros(batch_size, self.num_hidden))
-
         self.EMM = EMM_NTM(self.num_hidden, self.batch_size, num_reads=self.num_reads,
                            num_shifts=3, memory_dims=self.memory_dims)
 
@@ -108,31 +106,32 @@ class NTM(nn.Module):
 
         self.hid_to_out = nn.Linear(self.num_hidden, self.num_outputs)
 
-        self.wr, self.ww, self.memory = self.EMM.init_weights_mem()
+    def init_hidden(self):
+        wr, ww, memory = self.EMM.init_weights_mem()
+        hidden = Variable(torch.zeros(self.batch_size, self.num_hidden), requires_grad=True)
+        return hidden, wr, ww, memory
 
-    def forward(self, x):
+    def forward(self, x, h, wr, ww, m):
 
         x = x.permute(1, 0, 2, 3)
 
-        def step(x_t):
-            r_t, self.wr, self.ww, self.memory = self.EMM(self.hidden, self.wr, self.ww, self.memory)
+        def step(x_t, h_t, wr_t, ww_t, m_t):
+            r_t, wr_t, ww_t, m_t = self.EMM(h_t, wr_t, ww_t, m_t)
 
             h_t = self.controller(x_t, r_t)
             h_t = h_t.view(-1, num_flat_features(h_t))
             self.hidden = h_t
 
-            out = Funct.sigmoid(self.hid_to_out(self.hidden))
-            return out
+            out = Funct.sigmoid(self.hid_to_out(h_t))
+            return out, h_t, wr_t, ww_t, m_t
 
-        outs = torch.stack(
-            [
-                step(x_t) for x_t in torch.unbind(x, 0)
-            ], 1)  # stack along the correct index so we don't have to permute.
+        x_t = torch.unbind(x, 0)
+        out = []
+        for i in range(x.size()[0]):
+            o, h, wr, ww, m = step(x_t[i], h, wr, ww, m)
+            out.append(o)
 
-        self.hidden = Variable(self.hidden.data)  # decouple history here
-        self.wr = Variable(self.wr.data)
-        self.ww = Variable(self.ww.data)
-        self.memory = Variable(self.memory.data)
+        outs = torch.stack(out, 1)
         return outs
 
 
@@ -169,7 +168,7 @@ class GPU_NTM(nn.Module):
         focused_write_filter, \
         wide_write_filter, \
         memory = self.EMM.init_filters_mem()
-        hidden = Variable(torch.zeros(self.batch_size, self.num_hidden))
+        hidden = Variable(torch.zeros(self.batch_size, self.num_hidden), requires_grad=True)
 
         return hidden, focused_read_filter, wide_read_filter, focused_write_filter, wide_write_filter, memory
 
@@ -198,7 +197,7 @@ class GPU_NTM(nn.Module):
         return outs
 
 
-def train_gpu(batch, num_inputs, seq_len, num_hidden):
+def train_gpu(batch, num_inputs, seq_len, num_hidden):  # changed focused conv to 1x1 and wide to 5x5, try that out
     import matplotlib.pyplot as plt
     from torch.utils.data import DataLoader
 
@@ -215,8 +214,8 @@ def train_gpu(batch, num_inputs, seq_len, num_hidden):
     criterion = nn.L1Loss()
     optimizer = optim.RMSprop(ntm.parameters(), lr=1e-3, weight_decay=0.00001)
 
-    max_seq_len = 5  # change the training schedule to be curriculum training
-    for length in range(2, max_seq_len):
+    max_seq_len = 20  # change the training schedule to be curriculum training
+    for length in range(10, max_seq_len):
         running_loss = 0.0
 
         test = CopyTask(length, [num_inputs, 1], num_samples=2e4)
@@ -300,6 +299,7 @@ def train_ntm(batch, num_inputs, seq_len, num_hidden):
     from torch.utils.data import DataLoader
 
     ntm = NTM(num_inputs, num_hidden, num_inputs, batch, num_reads=1)
+    h, wr, ww, m = ntm.init_hidden()
 
     try:
         ntm.load_state_dict(torch.load("models/copy_seqlen_{}.dat".format(seq_len)))
@@ -310,12 +310,12 @@ def train_ntm(batch, num_inputs, seq_len, num_hidden):
 
     state = ntm.state_dict()
 
-    criterion = nn.MSELoss()
-    optimizer = optim.RMSprop(ntm.parameters(), lr=1e-3, weight_decay=0.0005)
+    criterion = nn.L1Loss()
+    optimizer = optim.RMSprop(ntm.parameters(), lr=1e-3, weight_decay=0.00001)
     # weight_decay=0.0005 seems to be a good balance
 
-    max_seq_len = 20  # change the training schedule to be curriculum training
-    for length in range(2, max_seq_len):
+    max_seq_len = 20
+    for length in range(3, max_seq_len):
         running_loss = 0.0
 
         test = CopyTask(length, [num_inputs, 1], num_samples=2e4)
@@ -330,13 +330,11 @@ def train_ntm(batch, num_inputs, seq_len, num_hidden):
                 labels = Variable(labels)
 
                 ntm.zero_grad()
-                outputs = ntm(inputs)
+                outputs = ntm(inputs, h, wr, ww, m)
 
                 loss = criterion(outputs, labels)
                 loss.backward()
                 optimizer.step()
-
-                # assert not (ntm.state_dict()['hid_to_out.bias'] == state['hid_to_out.bias'])[0]
 
                 running_loss += loss.data[0]
 
@@ -345,13 +343,13 @@ def train_ntm(batch, num_inputs, seq_len, num_hidden):
                     print('[length: %d, epoch: %d, i: %5d] average loss: %.3f' % (length, epoch + 1, i + 1,
                                                                                   running_loss / 1000))
 
-                    plt.imshow(ntm.wr.squeeze(0).data.numpy())
+                    plt.imshow(wr.squeeze(0).data.numpy())
                     plt.savefig("plots/ntm/{}_{}_{}_read.png".format(length, epoch+1, i + 1))
                     plt.close()
-                    plt.imshow(ntm.memory.squeeze().data.numpy().T)
+                    plt.imshow(m.squeeze().data.numpy().T)
                     plt.savefig("plots/ntm/{}_{}_{}_memory.png".format(length, epoch + 1, i + 1))
                     plt.close()
-                    plt.imshow(ntm.ww.data.numpy())
+                    plt.imshow(ww.data.numpy())
                     plt.savefig("plots/ntm/{}_{}_{}_write.png".format(length, epoch + 1, i + 1))
                     plt.close()
                     plottable_input = torch.squeeze(inputs.data[0]).numpy()
