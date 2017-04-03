@@ -26,19 +26,21 @@ class CopyTask(Dataset):
         rand_seq_len = np.random.randint(low=2, high=self.max_seq_len)
         zeros = torch.zeros(*self.input_size)
 
+        sample_label.append(zeros)
         for i in range(rand_seq_len):
             sample.append(torch.bernoulli(self.input_tensor))
-            sample_label.append(zeros)
-
-        sample.append(torch.ones(*zeros.size()) * 0.5)
-        sample_label.append(zeros)
-
-        for i in range(rand_seq_len):
             sample_label.append(sample[i])
-            sample.append(zeros)
 
-        sample = torch.stack(sample).view(2*rand_seq_len + 1, *self.input_size)
-        sample_label = torch.cat(sample_label).view(2*rand_seq_len + 1, *self.input_size)
+        sample.append(zeros)
+        # sample.append(torch.ones(*zeros.size()) * 0.5)
+        # sample_label.append(zeros)
+
+        # for i in range(rand_seq_len):
+        #     sample_label.append(sample[i])
+        #     sample.append(zeros)
+
+        sample = torch.stack(sample).view(rand_seq_len + 1, *self.input_size)
+        sample_label = torch.cat(sample_label).view(rand_seq_len + 1, *self.input_size)
 
         return sample, sample_label
 

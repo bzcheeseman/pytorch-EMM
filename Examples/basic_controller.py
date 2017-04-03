@@ -215,7 +215,7 @@ def train_gpu(batch, num_inputs, seq_len, num_hidden):  # changed focused conv t
     optimizer = optim.RMSprop(ntm.parameters(), lr=1e-3, weight_decay=0.00001)
 
     max_seq_len = 20  # change the training schedule to be curriculum training
-    for length in range(10, max_seq_len):
+    for length in range(4, max_seq_len):
         running_loss = 0.0
 
         test = CopyTask(length, [num_inputs, 1], num_samples=2e4)
