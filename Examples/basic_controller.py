@@ -108,7 +108,7 @@ class NTM(nn.Module):
 
     def init_hidden(self):
         wr, ww, memory = self.EMM.init_weights_mem()
-        hidden = Variable(torch.zeros(self.batch_size, self.num_hidden), requires_grad=True)
+        hidden = Variable(torch.zeros(self.batch_size, self.num_hidden))
         return hidden, wr, ww, memory
 
     def forward(self, x, h, wr, ww, m):
@@ -132,7 +132,7 @@ class NTM(nn.Module):
             out.append(o)
 
         outs = torch.stack(out, 1)
-        return outs
+        return outs, h, wr, ww, m
 
 
 class GPU_NTM(nn.Module):
@@ -143,7 +143,7 @@ class GPU_NTM(nn.Module):
                  batch_size,
                  mem_banks,
                  num_reads,
-                 memory_dims=(8, 8)):
+                 memory_dims=(5, 5)):
         super(GPU_NTM, self).__init__()
 
         self.num_inputs = num_inputs
@@ -194,7 +194,7 @@ class GPU_NTM(nn.Module):
 
         outs = torch.stack(out, 1)
 
-        return outs
+        return outs, h, frf, wrf, fwf, wwf, m
 
 
 def train_gpu(batch, num_inputs, seq_len, num_hidden):  # changed focused conv to 1x1 and wide to 5x5, try that out
@@ -211,26 +211,39 @@ def train_gpu(batch, num_inputs, seq_len, num_hidden):  # changed focused conv t
     ntm.train()
     h, frf, wrf, fwf, wwf, m = ntm.init_hidden()
 
-    criterion = nn.L1Loss()
-    optimizer = optim.RMSprop(ntm.parameters(), lr=1e-3, weight_decay=0.00001)
+    criterion = nn.SmoothL1Loss()
 
-    max_seq_len = 20  # change the training schedule to be curriculum training
+    max_seq_len = 20
+    current_lr = 1e-3
+    print_steps = 1000
+    optimizer = optim.Adam(ntm.parameters(), lr=current_lr, weight_decay=0.000005)
+
     for length in range(4, max_seq_len):
+        current_lr = 1e-3
         running_loss = 0.0
+        prev_running_loss = []
 
-        test = CopyTask(length, [num_inputs, 1], num_samples=2e4)
+        test = CopyTask(length, [num_inputs, 1], num_samples=3e4)
 
         data_loader = DataLoader(test, batch_size=batch, shuffle=True, num_workers=4)
 
-        for epoch in range(5):
+        for epoch in range(1):
 
             for i, data in enumerate(data_loader, 0):
+
                 inputs, labels = data
                 inputs = Variable(inputs)
                 labels = Variable(labels)
 
                 ntm.zero_grad()
-                outputs = ntm(inputs, h, frf, wrf, fwf, wwf, m)
+                outputs, h, frf, wrf, fwf, wwf, m = ntm(inputs, h, frf, wrf, fwf, wwf, m)
+
+                h = Variable(h.data)
+                frf = Variable(frf.data)
+                wrf = Variable(wrf.data)
+                fwf = Variable(fwf.data)
+                wwf = Variable(wwf.data)
+                m = Variable(m.data)
 
                 loss = criterion(outputs, labels)
                 loss.backward()
@@ -238,9 +251,9 @@ def train_gpu(batch, num_inputs, seq_len, num_hidden):  # changed focused conv t
 
                 running_loss += loss.data[0]
 
-                if i % 1000 == 999:
+                if i % print_steps == print_steps-1:
                     print('[length: %d, epoch: %d, i: %5d] average loss: %.3f' % (length, epoch + 1, i + 1,
-                                                                                  running_loss / 1000))
+                                                                                  running_loss / print_steps))
 
                     plt.imshow(m[0, 0].data.numpy())
                     plt.savefig("plots/ntm/{}_{}_{}_memory.png".format(length, epoch + 1, i + 1))
@@ -258,8 +271,19 @@ def train_gpu(batch, num_inputs, seq_len, num_hidden):  # changed focused conv t
                     plt.savefig("plots/ntm/{}_{}_{}_true_output.png".format(length, epoch + 1, i + 1))
                     plt.close()
 
-                    if running_loss / 1000 <= 0.005:
-                        break
+                    # print("Previous average losses since lr decay: ", prev_running_loss)
+
+                    prev_running_loss.append(running_loss / print_steps)
+
+                    if len(prev_running_loss) > 2:
+
+                        if np.abs(np.diff(prev_running_loss)).min() <= 0.001 \
+                                and running_loss/print_steps < 1./len(prev_running_loss):
+                            torch.save(ntm.state_dict(), "models/gpu_copy_seqlen_{}.dat".format(seq_len))
+                            current_lr = max([current_lr * 1e-1, 1e-7])
+                            print("lr decayed to: ", current_lr)
+                            optimizer = optim.Adam(ntm.parameters(), lr=current_lr, weight_decay=0.000005)
+                            prev_running_loss.clear()
 
                     running_loss = 0.0
 
@@ -311,11 +335,10 @@ def train_ntm(batch, num_inputs, seq_len, num_hidden):
     state = ntm.state_dict()
 
     criterion = nn.L1Loss()
-    optimizer = optim.RMSprop(ntm.parameters(), lr=1e-3, weight_decay=0.00001)
-    # weight_decay=0.0005 seems to be a good balance
+    optimizer = optim.Adam(ntm.parameters(), lr=1e-3, weight_decay=0.00001)
 
     max_seq_len = 20
-    for length in range(3, max_seq_len):
+    for length in range(4, max_seq_len):
         running_loss = 0.0
 
         test = CopyTask(length, [num_inputs, 1], num_samples=2e4)
@@ -330,7 +353,12 @@ def train_ntm(batch, num_inputs, seq_len, num_hidden):
                 labels = Variable(labels)
 
                 ntm.zero_grad()
-                outputs = ntm(inputs, h, wr, ww, m)
+                outputs, h, wr, ww, m = ntm(inputs, h, wr, ww, m)
+
+                h = Variable(h.data)
+                wr = Variable(wr.data)
+                ww = Variable(ww.data)
+                m = Variable(m.data)
 
                 loss = criterion(outputs, labels)
                 loss.backward()
