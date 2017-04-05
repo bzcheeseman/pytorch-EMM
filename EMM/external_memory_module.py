@@ -133,13 +133,13 @@ class EMM_NTM(nn.Module):
         return r_t.squeeze(1), wr_t, ww_t, m_t  # batch_size x num_reads
 
 
-class EMM_GPU(nn.Module):
+class EMM_GPU(nn.Module):  # want to write a sequence to memory, then read it out
     def __init__(self,
                  num_hidden,
                  read_size,
                  batch_size,
-                 memory_banks=1,
-                 memory_dims=(5, 5)):
+                 memory_banks=32,
+                 memory_dims=(8, 8)):
         super(EMM_GPU, self).__init__()
 
         self.memory_dims = memory_dims
@@ -162,6 +162,7 @@ class EMM_GPU(nn.Module):
         self.conv_wide_to_read = nn.Linear(
             (self.memory_dims[0] - 1 + 1) * (self.memory_dims[1] - 3 + 1), self.read_size
         )
+        # self.read_bn = nn.BatchNorm2d(self.memory_banks)
 
         # Writing ##############################################################################################
         self.hidden_focused_to_conv = nn.Linear(self.num_hidden,
@@ -171,6 +172,8 @@ class EMM_GPU(nn.Module):
                                              (self.memory_dims[0] + 1 - 1)
                                              * (self.memory_dims[1] + 3 - 1))
 
+        # self.write_bn = nn.BatchNorm2d(1)
+
         # Add and erase gate for writing ##
         self.add_gate = nn.Linear(self.num_hidden, 1)
         self.erase_gate = nn.Linear(self.num_hidden, 1)
@@ -179,11 +182,11 @@ class EMM_GPU(nn.Module):
         self.hidden_to_write_w = nn.Linear(self.num_hidden, self.memory_banks * 1 * 3)
 
     def init_filters_mem(self):
-        focused_read_filter = Variable(torch.ones(1, self.memory_banks, 3, 1), requires_grad=True)  # (out, in, kh, kw)
-        wide_read_filter = Variable(torch.ones(1, self.memory_banks, 1, 3), requires_grad=True)
-        focused_write_filter = Variable(torch.ones(self.memory_banks, 1, 3, 1), requires_grad=True)  # (out, in, kh, kw)
-        wide_write_filter = Variable(torch.ones(self.memory_banks, 1, 1, 3), requires_grad=True)
-        memory = Variable(torch.ones(self.batch_size, self.memory_banks, *self.memory_dims), requires_grad=True) * 1e-4
+        focused_read_filter = Variable(torch.zeros(1, self.memory_banks, 3, 1))  # (out, in, kh, kw)
+        wide_read_filter = Variable(torch.zeros(1, self.memory_banks, 1, 3))
+        focused_write_filter = Variable(torch.zeros(self.memory_banks, 1, 3, 1))  # (out, in, kh, kw)
+        wide_write_filter = Variable(torch.zeros(self.memory_banks, 1, 1, 3))
+        memory = Variable(torch.ones(self.batch_size, self.memory_banks, *self.memory_dims)) * 1e-4
 
         return focused_read_filter, wide_read_filter, focused_write_filter, wide_write_filter, memory
 
@@ -192,12 +195,12 @@ class EMM_GPU(nn.Module):
         frf_t = Funct.hardtanh(self.hidden_to_read_f(h_t), min_val=0.0, max_val=1.0)
         wrf_t = Funct.hardtanh(self.hidden_to_read_w(h_t), min_val=0.0, max_val=1.0)
 
-        frf_t = frf_t.view(*frf.size())
-        wrf_t = wrf_t.view(*wrf.size())
+        frf_t = Funct.softmax(frf_t.view(*frf.size()))  # or could be batchnorm
+        wrf_t = Funct.softmax(wrf_t.view(*wrf.size()))
 
-        frf_t = frf_t * gf_t.expand_as(frf_t) + frf * (1.0 - gf_t.expand_as(frf_t))  # get rid of gates here?
-
-        wrf_t = wrf_t * gw_t.expand_as(wrf_t) + wrf * (1.0 - gw_t.expand_as(wrf_t))
+        # frf_t = frf_t * gf_t.expand_as(frf_t) + frf * (1.0 - gf_t.expand_as(frf_t))  # get rid of gates here?
+        #
+        # wrf_t = wrf_t * gw_t.expand_as(wrf_t) + wrf * (1.0 - gw_t.expand_as(wrf_t))
 
         focused = Funct.relu(Funct.conv2d(m, frf_t))
         # memory_dims[0] - 3 + 1, memory_dims[1] - 1 + 1
@@ -218,13 +221,13 @@ class EMM_GPU(nn.Module):
         fwf_t = Funct.hardtanh(self.hidden_to_write_f(h_t), min_val=0.0, max_val=1.0)
         wwf_t = Funct.hardtanh(self.hidden_to_write_w(h_t), min_val=0.0, max_val=1.0)
 
-        fwf_t = fwf_t.view(*fwf.size())
-        wwf_t = wwf_t.view(*wwf.size())
+        fwf_t = Funct.softmax(fwf_t.view(*fwf.size()))
+        wwf_t = Funct.softmax(wwf_t.view(*wwf.size()))
 
         # Gate the filters
-        fwf_t = fwf_t * gf_t.expand_as(fwf_t) + fwf * (1.0 - gf_t.expand_as(fwf))
-
-        wwf_t = wwf_t * gw_t.expand_as(wwf_t) + wwf * (1.0 - gw_t.expand_as(wwf))
+        # fwf_t = fwf_t * gf_t.expand_as(fwf_t) + fwf * (1.0 - gf_t.expand_as(fwf))
+        #
+        # wwf_t = wwf_t * gw_t.expand_as(wwf_t) + wwf * (1.0 - gw_t.expand_as(wwf))
 
         # Turn h into write matrices
         mwf_t = Funct.hardtanh(self.hidden_focused_to_conv(h_t))

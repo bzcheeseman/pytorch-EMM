@@ -143,7 +143,7 @@ class GPU_NTM(nn.Module):
                  batch_size,
                  mem_banks,
                  num_reads,
-                 memory_dims=(5, 5)):
+                 memory_dims=(8, 8)):
         super(GPU_NTM, self).__init__()
 
         self.num_inputs = num_inputs
@@ -197,11 +197,11 @@ class GPU_NTM(nn.Module):
         return outs, h, frf, wrf, fwf, wwf, m
 
 
-def train_gpu(batch, num_inputs, seq_len, num_hidden):  # changed focused conv to 1x1 and wide to 5x5, try that out
+def train_gpu(batch, num_inputs, seq_len, num_hidden):
     import matplotlib.pyplot as plt
     from torch.utils.data import DataLoader
 
-    ntm = GPU_NTM(num_inputs, num_hidden, num_inputs, batch, num_reads=1, mem_banks=5)
+    ntm = GPU_NTM(num_inputs, num_hidden, num_inputs, batch, num_reads=1, mem_banks=32)
 
     try:
         ntm.load_state_dict(torch.load("models/copy_seqlen_{}.dat".format(seq_len)))
@@ -216,9 +216,9 @@ def train_gpu(batch, num_inputs, seq_len, num_hidden):  # changed focused conv t
     max_seq_len = 20
     current_lr = 1e-3
     print_steps = 1000
-    optimizer = optim.Adam(ntm.parameters(), lr=current_lr, weight_decay=0.000005)
+    optimizer = optim.Adam(ntm.parameters(), lr=current_lr)
 
-    for length in range(4, max_seq_len):
+    for length in range(4, max_seq_len, 2):
         current_lr = 1e-3
         running_loss = 0.0
         prev_running_loss = []
@@ -280,9 +280,9 @@ def train_gpu(batch, num_inputs, seq_len, num_hidden):  # changed focused conv t
                         if np.abs(np.diff(prev_running_loss)).min() <= 0.001 \
                                 and running_loss/print_steps < 1./len(prev_running_loss):
                             torch.save(ntm.state_dict(), "models/gpu_copy_seqlen_{}.dat".format(seq_len))
-                            current_lr = max([current_lr * 1e-1, 1e-7])
+                            current_lr = max([current_lr * 1e-1, 1e-6])
                             print("lr decayed to: ", current_lr)
-                            optimizer = optim.Adam(ntm.parameters(), lr=current_lr, weight_decay=0.000005)
+                            optimizer = optim.Adam(ntm.parameters(), lr=current_lr)
                             prev_running_loss.clear()
 
                     running_loss = 0.0
@@ -429,8 +429,4 @@ def train_ntm(batch, num_inputs, seq_len, num_hidden):
 
 if __name__ == '__main__':
     # train_ntm(1, 8, 5, 100)
-    train_gpu(1, 8, 5, 100)
-
-    # OLD WAY OF SEQUENCING
-    # total loss on 5x seq length is 0.017 with 1 memory bank, 1 epoch
-    # total loss on 5x seq length is 7.81e-5 with 3 memory banks, 1 epoch
+    train_gpu(1, 8, 5, 30)
